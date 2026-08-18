@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quorum</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 120'><path d='M36 54 C30 68 23 84 23 93 Q23 102 33 102 L67 102 Q77 102 77 93 C77 84 70 68 64 54 Z' fill='%23f5a524' stroke='%2312141c' stroke-width='4'/><rect x='27' y='17' width='46' height='40' rx='13' fill='%23f5a524' stroke='%2312141c' stroke-width='4'/><circle cx='42' cy='37' r='5' fill='%2312141c'/><circle cx='58' cy='37' r='5' fill='%2312141c'/><path d='M50 2 L58 18 L50 15 L42 18 Z' fill='%23ffd48a' stroke='%2312141c' stroke-width='3'/></svg>">
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <span class="brand"><span id="mascot-slot"></span><span class="brand-word">QUORUM</span><span id="edition-badge" class="edition free">FREE</span></span>
+  <nav id="view-toggle" aria-label="View">
+    <button type="button" data-view="office" class="on">Studio</button>
+    <button type="button" data-view="table">Roundtable</button>
+    <button type="button" data-view="deck">Deck</button>
+    <button type="button" data-view="board">Board</button>
+    <button type="button" data-view="radar">Radar</button>
+  </nav>
+  <span id="tb-tasks"></span>
+  <span id="tb-agents"></span>
+  <span class="spacer"></span>
+  <span id="tb-mem"></span>
+  <span id="tb-conn" class="dot down" title="websocket"></span>
+</header>
+
+<!-- ── STUDIO ─────────────────────────────────────────────────────────── -->
+<main id="view-office" class="view">
+  <section id="team-strip">
+    <div class="col-head">CREW</div>
+    <div id="crew-list"></div>
+    <p class="hint crew-hint">Drag a character onto a room to seat them there.</p>
+    <div class="col-head">RUNTIME</div>
+    <div id="team-desks"></div>
+  </section>
+
+  <section id="office-floor">
+    <div class="col-head">PROJECT ROOMS <span id="room-count"></span></div>
+    <div id="floor-stage">
+      <div id="rooms-grid"></div>
+      <!-- Avatars live in their own layer so the 2s room re-render can't destroy
+           them mid-transition; positions are read from room rects. -->
+      <div id="avatar-layer" aria-hidden="true"></div>
+    </div>
+  </section>
+
+  <section id="office-side">
+    <div class="col-head" id="room-detail-head">select a room</div>
+    <div id="room-detail">
+      <div class="empty">⌁ pick a project room — teammates light up when sessions sit in that cwd</div>
+    </div>
+    <div class="card office-spawn-card">
+      <div class="card-head">SEAT A TEAMMATE</div>
+      <div id="room-spawn-actions">
+        <button type="button" data-profile="claude" disabled>+ claude</button>
+        <button type="button" data-profile="codex" disabled>+ codex</button>
+        <button type="button" data-profile="hermes" disabled>+ hermes</button>
+        <button type="button" data-profile="shell" disabled>+ zsh</button>
+      </div>
+      <p class="hint">Spawns a PTY in the selected room’s project directory and stamps presence.</p>
+    </div>
+    <div class="card">
+      <div class="card-head">ROOM SESSIONS</div>
+      <div id="room-sessions" class="empty-sm">—</div>
+    </div>
+    <div class="card">
+      <div class="card-head">CHAT <span id="chat-target">— no agent selected</span></div>
+      <div id="chat-log" class="empty-sm">Click an agent avatar on the floor to talk to it.</div>
+      <form id="chat-form" autocomplete="off">
+        <input id="chat-input" type="text" placeholder="message this agent…" disabled>
+        <button type="submit" id="chat-send" disabled>send</button>
+      </form>
+      <p class="hint" id="chat-hint"></p>
+    </div>
+  </section>
+</main>
+
+<!-- ── ROUNDTABLE ─────────────────────────────────────────────────────── -->
+<main id="view-table" class="view hidden">
+  <section id="rt-setup">
+    <div class="col-head">CALL A ROUNDTABLE</div>
+    <form id="rt-form" autocomplete="off">
+      <label class="fld">
+        <span>Question</span>
+        <textarea id="rt-topic" rows="3" placeholder="Should the publish queue retry failed posts automatically, or surface them for manual review?"></textarea>
+      </label>
+      <label class="fld">
+        <span>Room <em>grounds the debate in that project’s CLAUDE.md</em></span>
+        <select id="rt-room"></select>
+      </label>
+      <div class="fld">
+        <span>Seat the table <em>2–5 · they argue from conflicting priorities</em></span>
+        <div id="rt-cast"></div>
+      </div>
+      <label class="fld">
+        <span>Model</span>
+        <select id="rt-model">
+          <option value="sonnet">sonnet — balanced</option>
+          <option value="opus">opus — deepest, priciest</option>
+          <option value="haiku">haiku — fastest, cheapest</option>
+        </select>
+      </label>
+      <div id="rt-estimate" class="rt-estimate"></div>
+      <button type="submit" id="rt-start">convene</button>
+      <button type="button" id="rt-cancel" class="danger hidden">cancel — stops spending</button>
+      <p class="hint">Each turn is a separate headless agent with tools and MCP stripped: debaters reason, they never touch your files.</p>
+    </form>
+    <div class="col-head">ARCHIVE</div>
+    <div id="rt-archive" class="empty-sm">no debates yet</div>
+  </section>
+
+  <section id="rt-stage-col">
+    <div class="col-head" id="rt-phase-head">the table is empty</div>
+    <div id="rt-stage">
+      <div class="rt-empty">
+        <div id="rt-empty-art"></div>
+        <p>Pose a question and seat two or more of the crew.<br>They open blind, then have to argue with each other.</p>
+      </div>
+    </div>
+    <div id="rt-phases"></div>
+  </section>
+
+  <section id="rt-log-col">
+    <div class="col-head">TRANSCRIPT <span id="rt-cost"></span></div>
+    <div id="rt-movement"></div>
+    <div id="rt-log" class="empty-sm">—</div>
+  </section>
+</main>
+
+<!-- ── DECK ───────────────────────────────────────────────────────────── -->
+<main id="view-deck" class="view hidden">
+  <section id="deck-main">
+    <div class="deck-head col-head">
+      <span>COMMAND DECK <span id="deck-count"></span></span>
+      <span id="deck-connection">LIVE LINK · —</span>
+    </div>
+    <div id="deck-space" aria-label="3D project and agent command room">
+      <div class="deck-grid-plane"></div>
+      <div class="deck-orbit orbit-a"></div>
+      <div class="deck-orbit orbit-b"></div>
+      <div id="deck-core" class="deck-core" tabindex="0" title="Open system radar">
+        <span class="core-ring"></span>
+        <span class="core-label">TRIDENT<br><b>CORE</b></span>
+        <span id="deck-core-stats">awaiting state</span>
+      </div>
+      <div id="deck-nodes"></div>
+      <div id="deck-agent-links" aria-hidden="true"></div>
+    </div>
+  </section>
+  <aside id="deck-side">
+    <div class="card deck-status-card">
+      <div class="card-head">SYSTEM PRESSURE <span id="deck-pressure-label">—</span></div>
+      <div id="deck-stats" class="deck-stats"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">SELECTED NODE <span id="deck-detail-kind">—</span></div>
+      <div id="deck-detail" class="deck-detail"><div class="empty-sm">Select a project or agent in the room.</div></div>
+      <div id="deck-actions" class="deck-actions"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">LIVE SESSIONS <span id="deck-session-count">—</span></div>
+      <div id="deck-sessions" class="deck-sessions"><div class="empty-sm">—</div></div>
+    </div>
+    <div class="card deck-legend">
+      <div class="card-head">CONTROLS</div>
+      <div>click node · inspect</div>
+      <div>double click · open transcript</div>
+      <div>seat CLI · opens real PTY drawer</div>
+    </div>
+  </aside>
+</main>
+
+<!-- ── BOARD ──────────────────────────────────────────────────────────── -->
+<main id="view-board" class="view hidden">
+  <section id="board-col">
+    <div class="col-head">GLOBAL TASK BOARD <span id="board-count"></span></div>
+    <div id="board-columns">
+      <div class="board-col" data-status="in_progress"><div class="board-col-head">IN PROGRESS</div><div class="board-list" id="board-in_progress"></div></div>
+      <div class="board-col" data-status="pending"><div class="board-col-head">PENDING</div><div class="board-list" id="board-pending"></div></div>
+      <div class="board-col" data-status="completed"><div class="board-col-head">RECENTLY DONE</div><div class="board-list" id="board-completed"></div></div>
+    </div>
+  </section>
+  <section id="board-side">
+    <div class="card">
+      <div class="card-head">COMPOSIO <span id="composio-summary"></span></div>
+      <div id="composio-card" class="kv"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">LIVE AGENTS</div>
+      <div id="agents-card"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ── RADAR ──────────────────────────────────────────────────────────── -->
+<main id="view-radar" class="view hidden">
+  <section id="sessions-col">
+    <div class="col-head">SESSIONS <span id="sess-count"></span></div>
+    <div id="sessions-list"></div>
+  </section>
+
+  <section id="detail-col">
+    <div class="col-head" id="detail-head">select a session to tail its transcript live</div>
+    <div id="transcript"><div class="empty">⌁ no session selected</div></div>
+  </section>
+
+  <section id="side-col">
+    <div class="card">
+      <div class="card-head">SYSTEM <span id="sys-load"></span></div>
+      <canvas id="memchart"></canvas>
+      <canvas id="swapchart"></canvas>
+      <div id="sys-nums" class="kv"></div>
+    </div>
+    <div class="card"><div class="card-head">RENDER ENGINE</div><div id="comfy-card" class="kv"></div></div>
+    <div class="card"><div class="card-head">HERMES</div><div id="hermes-card" class="kv"></div></div>
+    <div class="card"><div class="card-head">AGENT AUTH</div><div id="auth-card" class="kv"></div></div>
+    <div class="card"><div class="card-head">TOP MEMORY</div><div id="top-procs"></div></div>
+    <div class="card"><div class="card-head">EVENTS</div><div id="feed-list"></div></div>
+  </section>
+</main>
+
+<div id="drawer">
+  <div id="drawer-handle" title="drag to resize · ctrl+` to toggle"></div>
+  <div id="drawer-bar">
+    <div id="term-tabs"></div>
+    <div class="spacer"></div>
+    <div id="term-actions">
+      <button data-profile="claude">+ claude</button>
+      <button data-profile="codex">+ codex</button>
+      <button data-profile="hermes">+ hermes</button>
+      <button data-profile="shell">+ zsh</button>
+    </div>
+  </div>
+  <div id="terms"></div>
+</div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

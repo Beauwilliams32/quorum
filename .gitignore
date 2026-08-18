@@ -1,0 +1,17 @@
+node_modules/
+*.log
+.DS_Store
+/target/
+/.operator-data/
+dist/
+*.tsbuildinfo
+
+# Phase-0 quarantine build/install artifacts (do not commit)
+archive/phase0-coordinator/target/
+archive/phase0-coordinator/node_modules/
+archive/phase0-coordinator/.phase0-proof/
+
+# Quorum Pro — must never be committed to the public repo
+src/cast-pro.js
+scripts/issue-licence.mjs
+docs/pro/
