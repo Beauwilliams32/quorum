@@ -23,8 +23,26 @@
   <span id="tb-agents"></span>
   <span class="spacer"></span>
   <span id="tb-mem"></span>
+  <button type="button" id="tb-help" title="take the tour">?</button>
   <span id="tb-conn" class="dot down" title="websocket"></span>
 </header>
+
+<!-- Guided tour: one overlay, repositioned per step. Lives outside every view
+     so a step can point at any element regardless of which view is showing. -->
+<div id="tour" class="hidden" role="dialog" aria-label="Guided tour">
+  <div id="tour-ring"></div>
+  <div id="tour-card">
+    <div id="tour-step-label"></div>
+    <h3 id="tour-title"></h3>
+    <p id="tour-body"></p>
+    <div id="tour-nav">
+      <button type="button" id="tour-skip">skip</button>
+      <span class="spacer"></span>
+      <button type="button" id="tour-back">back</button>
+      <button type="button" id="tour-next">next</button>
+    </div>
+  </div>
+</div>
 
 <!-- ── STUDIO ─────────────────────────────────────────────────────────── -->
 <main id="view-office" class="view">

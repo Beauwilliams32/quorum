@@ -245,7 +245,15 @@ function renderOffice() {
     el.ondragstart = e => e.dataTransfer.setData('text/plain', 'runtime:' + el.dataset.agent)
 
   const rooms = proj.rooms || []
-  $('room-count').textContent = `· ${rooms.length}`
+  const cfg = proj.config
+  $('room-count').textContent = `· ${rooms.length}` +
+    (cfg ? ` · ${cfg.discovered} discovered` : '')
+  const head = document.querySelector('#office-floor .col-head')
+  if (head && cfg) {
+    head.title = cfg.malformed
+      ? `${cfg.path} is not valid JSON — using auto-discovery`
+      : `rooms come from ${cfg.exists ? cfg.path : 'auto-discovery'} · scanning ${(cfg.roots || []).join(', ')}`
+  }
   const debatingRoom = S.debate && !S.debate.endedAt ? S.debate.roomId : null
 
   $('rooms-grid').innerHTML = rooms.map(r => {
@@ -266,12 +274,29 @@ function renderOffice() {
       </div>
       ${mode === 'roundtable' ? '<span class="room-flag">roundtable in session</span>' : ''}
     </div>`
-  }).join('') || '<div class="empty">no project folders found under ~/CLAUDE</div>'
+  }).join('') || setupCard(cfg)
 
   for (const el of $('rooms-grid').querySelectorAll('.room')) {
     el.onclick = () => selectRoom(el.dataset.id)
     wireRoomDrop(el)
   }
+}
+
+/* The empty floor is a teaching moment, not an error. Tell the user exactly
+ * where rooms come from and the one file that changes it. */
+function setupCard(cfg) {
+  const p = cfg?.path || '~/.quorum/config.json'
+  return `<div class="setup-card">
+    <h3>No project rooms yet</h3>
+    <p>Quorum scans for projects automatically${cfg?.roots?.length ? ` under <code>${esc(cfg.roots.join('</code>, <code>'))}</code>` : ''} —
+    any folder with a <code>.git</code>, <code>package.json</code> or similar marker becomes a room.</p>
+    <p>To point it somewhere else, create <code>${esc(p)}</code>:</p>
+    <pre>{
+  "roots": ["~/code"],
+  "projects": [{ "id": "api", "label": "Billing API", "path": "~/code/api" }]
+}</pre>
+    <p class="hint">The floor refreshes within 30 seconds of the edit — no restart needed.</p>
+  </div>`
 }
 
 /* ── steering: drag a character into a room ────────────────────────────
@@ -917,13 +942,27 @@ function renderBoard() {
       const live = task.sessionActive ? '<span class="pulse"></span>' : ''
       // activeForm is the agent's own description of what it is doing right now.
       const sub = task.status === 'in_progress' && task.activeForm ? task.activeForm : task.description
-      return `<div class="task">
+      return `<div class="task clickable" data-sid="${esc(task.sessionId)}" title="open this session's transcript">
         <div class="task-head">${live}${room}${blocked}<span class="task-sid">${esc(task.sessionId.slice(0, 8))}</span></div>
         <div class="task-subj">${esc(task.subject)}</div>
         <div class="task-desc">${esc(String(sub || '').slice(0, 160))}</div>
       </div>`
     }).join('')
+
+    // A task names the session doing it, and we can usually show that session
+    // live — a board card that answers "what is this?" with a click beats one
+    // that just sits there.
+    for (const el of box.querySelectorAll('.task.clickable'))
+      el.onclick = () => openSessionById(el.dataset.sid)
   }
+}
+
+/** Jump from anything that knows a sessionId to that session's live transcript. */
+function openSessionById(sessionId) {
+  const card = (S.sessions?.cards || []).find(c => c.id === sessionId || sessionId.startsWith(c.id) || c.id.startsWith(sessionId))
+  if (!card) return
+  setView('radar')
+  selectSession(card.file, card.agent, card.cwd)
 }
 
 /* ── composio connections ──────────────────────────────── */
@@ -1378,11 +1417,13 @@ function renderArchive() {
         <span>${esc(d.roomLabel || '—')}</span>
         <span>${(d.participants || []).length} seats</span>
         <span>$${Number(d.costUsd || 0).toFixed(2)}</span>
-        ${d.cancelled ? '<span class="warn">cancelled</span>' : d.error ? '<span class="warn">failed</span>' : ''}
+        ${d.cancelled ? '<span class="warn">cancelled</span>' : d.error ? '<span class="warn">failed</span>'
+          : `<a class="arc-dl" href="/api/roundtable/${esc(d.id)}.md" download title="export decision record">⤓ .md</a>`}
       </div>
     </div>`).join('')
   for (const el of box.querySelectorAll('.arc'))
-    el.onclick = () => {
+    el.onclick = e => {
+      if (e.target.classList.contains('arc-dl')) return   // let the download be a download
       S.debate = S.archive.find(d => d.id === el.dataset.id) || S.debate
       S.speaking = null
       renderRoundtable()
@@ -1427,3 +1468,100 @@ function renderAll() {
 }
 
 connect()
+
+/* ── guided tour ───────────────────────────────────────────────────────
+ *
+ * Seven steps, each pinned to a real element in the live UI rather than to
+ * screenshots — the tour shows *this machine's* rooms and sessions, which is
+ * far more convincing than a canned demo. Steps may switch views: the target
+ * is resolved after the switch so the highlight lands on something visible.
+ */
+const TOUR = [
+  {
+    view: 'office', target: '#mascot-slot', title: 'This is Quorum',
+    body: 'A cockpit for the AI activity on this machine — and a table where AI specialists argue your decisions properly. The tour is seven steps and takes a minute.',
+  },
+  {
+    view: 'office', target: '#crew-list', title: 'The crew',
+    body: 'Each character argues from a different priority — the architect from long-term cost, the builder from shipping today. Click to seat them for a debate; drag one onto a room to argue about that project.',
+  },
+  {
+    view: 'office', target: '#rooms-grid', title: 'Project rooms',
+    body: 'Every room is a real folder on this machine, discovered automatically. Live AI sessions stand in the room matching their working directory. Click a room to inspect it; drop a runtime on it to open a terminal there.',
+  },
+  {
+    view: 'table', target: '#rt-form', title: 'Call a roundtable',
+    body: 'Pose a genuinely contested question, seat 2–5 of the crew, convene. Openings are written blind and in parallel, then each specialist must engage the strongest argument against them. Cost is shown before you spend.',
+  },
+  {
+    view: 'table', target: '#rt-stage', title: 'Watch the argument',
+    body: 'Characters speak on the stage; confidence is tracked across phases so you can see a mind actually change. The moderator ends with a decision record — including the dissent that survived.',
+  },
+  {
+    view: 'table', target: '#rt-archive', title: 'Keep the record',
+    body: 'Every finished debate is archived and exports as a markdown decision record you can commit next to the code it argues about. The argument is disposable; the record is not.',
+  },
+  {
+    view: 'office', target: '#term-actions', title: 'Real terminals',
+    body: 'These spawn actual PTYs — claude, codex, hermes or a shell — in the selected room’s directory. They live server-side, so a page reload doesn’t kill them. Ctrl+` toggles the drawer. That’s the tour — the ? button replays it.',
+  },
+]
+
+let tourStep = -1
+
+function tourStart() {
+  tourStep = 0
+  tourShow()
+}
+
+function tourShow() {
+  const step = TOUR[tourStep]
+  if (!step) return tourEnd()
+  if (S.view !== step.view) setView(step.view)
+  const el = document.querySelector(step.target)
+  $('tour').classList.remove('hidden')
+  $('tour-step-label').textContent = `${tourStep + 1} / ${TOUR.length}`
+  $('tour-title').textContent = step.title
+  $('tour-body').textContent = step.body
+  $('tour-back').disabled = tourStep === 0
+  $('tour-next').textContent = tourStep === TOUR.length - 1 ? 'done' : 'next'
+
+  const ring = $('tour-ring')
+  const card = $('tour-card')
+  if (el) {
+    const r = el.getBoundingClientRect()
+    const pad = 6
+    ring.style.cssText = `display:block;left:${r.left - pad}px;top:${r.top - pad}px;width:${r.width + pad * 2}px;height:${r.height + pad * 2}px`
+    // Card goes beside the ring, flipping to whichever half of the window has room.
+    const below = r.bottom + 190 < window.innerHeight
+    card.style.top = below ? `${Math.min(r.bottom + 14, window.innerHeight - 210)}px` : `${Math.max(10, r.top - 200)}px`
+    card.style.left = `${Math.max(10, Math.min(r.left, window.innerWidth - 360))}px`
+  } else {
+    ring.style.display = 'none'
+    card.style.top = '25%'
+    card.style.left = 'calc(50% - 170px)'
+  }
+}
+
+function tourEnd() {
+  tourStep = -1
+  $('tour').classList.add('hidden')
+  localStorage.setItem('quorum-tour-done', '1')
+}
+
+{
+  $('tb-help').onclick = tourStart
+  $('tour-skip').onclick = tourEnd
+  $('tour-next').onclick = () => { tourStep++; tourShow() }
+  $('tour-back').onclick = () => { tourStep = Math.max(0, tourStep - 1); tourShow() }
+  window.addEventListener('keydown', e => {
+    if (tourStep === -1) return
+    if (e.key === 'Escape') tourEnd()
+    if (e.key === 'ArrowRight' || e.key === 'Enter') { tourStep++; tourShow() }
+    if (e.key === 'ArrowLeft') { tourStep = Math.max(0, tourStep - 1); tourShow() }
+  })
+  window.addEventListener('resize', () => { if (tourStep >= 0) tourShow() })
+  // First visit only. The snapshot handler fires once real data is on screen,
+  // so the tour points at populated rooms rather than loading spinners.
+  if (!localStorage.getItem('quorum-tour-done')) setTimeout(tourStart, 1200)
+}

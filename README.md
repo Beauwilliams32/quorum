@@ -39,6 +39,30 @@ Requires the [Claude Code CLI](https://claude.com/claude-code) installed and
 authenticated: debate turns run as headless `claude -p` processes on your own
 account.
 
+First launch starts a **seven-step guided tour** (replay it anytime with the
+`?` button in the top bar).
+
+## Projects are discovered, not configured
+
+The floor populates automatically: Quorum scans your workspace roots
+(`~/CLAUDE`, `~/code`, `~/dev`, `~/src`, `~/projects`, `~/workspace` — whichever
+exist) and any folder with a `.git`, `package.json`, `CLAUDE.md`,
+`wrangler.toml`, `Cargo.toml`, `pyproject.toml`, `go.mod` or `Makefile` becomes
+a room.
+
+To take control, create `~/.quorum/config.json`:
+
+```json
+{
+  "roots": ["~/code", "~/work"],
+  "projects": [{ "id": "api", "label": "Billing API", "path": "~/code/api" }],
+  "hidden": ["some-discovered-id"]
+}
+```
+
+Explicit `projects` win over discovery; `hidden` suppresses rooms you don't
+want. The file is re-read every 30 seconds — edits apply without a restart.
+
 ## The roundtable
 
 Seat 2–5 of the crew and pose a question. Four phases:
@@ -152,11 +176,15 @@ src/licence.js          offline Ed25519 licence verification
 src/roundtable.js       debate protocol, turn execution, cost, cancellation
 src/decision-record.js  finished debate → exportable markdown ADR
 src/paths.js            data dir, with the pre-rename home still readable
+src/config.js           ~/.quorum/config.json + project auto-discovery
 public/art.js           character + room SVG art — one silhouette, six identities
 public/                 single-page UI (no build step)
 src/collectors/         processes · sessions · services · system · projects · tasks
 archive/phase0-coordinator/   quarantined Rust/Tauri Phase-0 (not the product)
 ```
+
+The complete map — every file, function, websocket message, endpoint and data
+path — is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Licence
 
