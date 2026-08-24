@@ -1,7 +1,13 @@
 import { sites } from "@openai/sites-vite-plugin";
 import vinext from "vinext";
 import { defineConfig } from "vite";
-import hostingConfig from "./.openai/hosting.json";
+import fs from "node:fs";
+
+// The hosted Sites workspace may provide private bindings here, but the
+// standalone public package must build without that file.
+const hostingConfig = fs.existsSync(new URL("./.openai/hosting.json", import.meta.url))
+  ? JSON.parse(fs.readFileSync(new URL("./.openai/hosting.json", import.meta.url), "utf8"))
+  : {};
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
