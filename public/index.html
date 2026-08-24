@@ -14,6 +14,7 @@
   <span class="brand"><span id="mascot-slot"></span><span class="brand-word">QUORUM</span><span id="edition-badge" class="edition free">FREE</span></span>
   <nav id="view-toggle" aria-label="View">
     <button type="button" data-view="office" class="on">Studio</button>
+    <button type="button" data-view="command">Command</button>
     <button type="button" data-view="table">Roundtable</button>
     <button type="button" data-view="deck">Deck</button>
     <button type="button" data-view="board">Board</button>
@@ -95,6 +96,25 @@
   </section>
 </main>
 
+<!-- ── COMMAND CENTER ──────────────────────────────────────────────── -->
+<main id="view-command" class="view hidden">
+  <section class="command-main">
+    <div class="col-head">TRIDENT COMMAND · UNIFIED OPERATOR</div>
+    <div class="command-hero">
+      <div><span class="eyebrow">LOCAL OPERATING SYSTEM</span><h1>Everything in motion.</h1><p>Portfolio readiness, Quorum decisions, live sessions, and validated runtimes in one local command surface.</p></div>
+      <div id="command-connection" class="command-connection">catalog loading…</div>
+    </div>
+    <div id="command-pulse" class="command-pulse"></div>
+    <div class="col-head">MODEL + HARNESS LIBRARY</div>
+    <div id="command-library" class="command-library"><div class="empty">loading local catalog…</div></div>
+  </section>
+  <aside class="command-side">
+    <div class="card"><div class="card-head">GUARDED CONTROL</div><p class="hint">Every launch, stop, route, and chain is previewed, explicitly confirmed, and written to the local event feed.</p><div id="command-preview" class="command-preview">select a runtime to preview launch</div><div id="command-actions" class="deck-actions"></div></div>
+    <div class="card"><div class="card-head">DECISION FLOW</div><div class="command-flow">Question <b>→</b> Roundtable <b>→</b> Approval <b>→</b> Task <b>→</b> Harness</div><button id="command-roundtable" type="button">open roundtable handoff</button></div>
+    <div class="card"><div class="card-head">SAFETY BOUNDARY</div><div class="kv"><div>storage <b>local only</b></div><div>auth <b>existing CLI / env</b></div><div>secrets <b>never displayed</b></div><div>pet assets <b>~/.quorum/pets</b></div></div></div>
+  </aside>
+</main>
+
 <!-- ── ROUNDTABLE ─────────────────────────────────────────────────────── -->
 <main id="view-table" class="view hidden">
   <section id="rt-setup">
@@ -119,6 +139,10 @@
           <option value="opus">opus — deepest, priciest</option>
           <option value="haiku">haiku — fastest, cheapest</option>
         </select>
+      </label>
+      <label class="fld">
+        <span>Authentication <em>Quorum never stores or displays keys</em></span>
+        <select id="rt-auth-mode"></select>
       </label>
       <div id="rt-estimate" class="rt-estimate"></div>
       <button type="submit" id="rt-start">convene</button>
@@ -204,6 +228,10 @@
     <div class="card">
       <div class="card-head">COMPOSIO <span id="composio-summary"></span></div>
       <div id="composio-card" class="kv"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">MEMORY CONTROL <span id="memory-summary"></span></div>
+      <div id="memory-card" class="kv"></div>
     </div>
     <div class="card">
       <div class="card-head">LIVE AGENTS</div>

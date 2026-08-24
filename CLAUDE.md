@@ -30,8 +30,8 @@ npm run check        # node --check sweep — the pre-commit gate
 npm test             # node --test test/*.test.mjs
 ```
 
-## Map
+## Public boundary
 
-The complete architecture — every file, function, websocket message, endpoint
-and data path — is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Keep it
-current when you change the code.
+The public tree contains only runtime-critical cockpit code, tests, install
+documentation, and safe open-core contracts. Internal architecture, backlog,
+Pro personas, licence tooling, and private runtime source are excluded.

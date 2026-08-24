@@ -8,7 +8,7 @@ const AVATAR_H = Math.round(LOD.avatar * 1.2)
 
 const S = {
   processes: null, sessions: null, services: null, system: null, projects: null,
-  tasks: null, composio: null, agents: null,
+  tasks: null, composio: null, agents: null, memory: null,
   hist: [], feed: [], selected: null, follow: true,
   terms: new Map(), activeTerm: null,
   // ?view= wins over the remembered view, so a view is linkable and a wedged
@@ -32,6 +32,8 @@ const S = {
   debate: null,          // the live (or last-viewed) debate snapshot
   speaking: null,        // { speaker, phase } while a turn is in flight
   archive: [],
+  catalog: null,
+  commandPreview: null,
 }
 
 const $ = id => document.getElementById(id)
@@ -68,6 +70,7 @@ const handlers = {
     S.tasks = m.data.tasks || null
     S.composio = m.data.composio || null
     S.agents = m.data.agents || null
+    S.memory = m.data.memory || null
     S.system = m.data.system?.latest || null
     S.hist = m.data.system?.hist ? [...m.data.system.hist] : []
     S.feed = m.feed || []
@@ -88,6 +91,7 @@ const handlers = {
       if (m.key === 'tasks') { renderBoard(); renderTopbar(); renderAvatars(); renderDeck() }
       if (m.key === 'composio') renderComposio()
       if (m.key === 'agents') { renderAgents(); renderAvatars(); renderDeck() }
+      if (m.key === 'memory') { renderMemory(); renderTopbar(); renderDeck() }
     }
   },
   event(m) {
@@ -125,6 +129,7 @@ const handlers = {
     S.cast = m.cast || []
     S.castById = new Map(S.cast.map(c => [c.id, c]))
     S.edition = m.edition || { tier: 'free', reason: '' }
+    S.catalog = m.catalog || S.catalog
     if (m.estCostPerTurnUsd) S.estCostPerTurn = m.estCostPerTurnUsd
     // A stored lineup from a previous Pro session must not survive a licence
     // lapsing, or "convene" fails server-side with no visible cause.
@@ -134,7 +139,10 @@ const handlers = {
     }
     persistSeated()
     renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderEdition()
+    renderCommand()
   },
+  'command.preview'(m) { S.commandPreview = m.preview; renderCommand() },
+  'command.done'(m) { S.commandPreview = null; renderCommand(); renderFeed() },
 
   'rt.list'(m) {
     S.archive = m.recent || []
@@ -178,6 +186,7 @@ const handlers = {
 // not remembering to add a matching toggle call three lines down.
 const VIEWS = {
   office: 'view-office',
+  command: 'view-command',
   table: 'view-table',
   deck: 'view-deck',
   board: 'view-board',
@@ -194,12 +203,20 @@ function setView(view) {
   if (view === 'radar') renderSystem()
   if (view === 'deck') renderDeck()
   if (view === 'office') { renderOffice(); renderAvatars() }
+  if (view === 'command') renderCommand()
   if (view === 'table') { renderRoundtable(); renderArchive() }
   if (view === 'board') { renderBoard(); renderComposio(); renderAgents() }
 }
 
 for (const b of document.querySelectorAll('#view-toggle button'))
   b.onclick = () => setView(b.dataset.view)
+
+document.getElementById('command-roundtable')?.addEventListener('click', () => setView('table'))
+
+// Apply the requested or remembered view immediately. The websocket snapshot can
+// arrive after first paint; direct links like ?view=table must not flash or stay
+// pinned to the default Studio markup while the local collectors warm up.
+setView(S.view)
 
 /* ── top bar ───────────────────────────────────────────── */
 function renderTopbar() {
@@ -210,7 +227,8 @@ function renderTopbar() {
     `<span class="tb-item">${dot((g.claude || 0) > 0)}claude <b>${g.claude || 0}</b></span>` +
     `<span class="tb-item">${dot(sv.hermes?.up)}hermes</span>` +
     `<span class="tb-item">${dot((g.codex || 0) > 0)}codex <b>${g.codex || 0}</b></span>` +
-    `<span class="tb-item">${dot(sv.comfy?.up)}comfy${comfyDl() ? ' <b>⇣dl</b>' : ''}</span>`
+    `<span class="tb-item">${dot(sv.comfy?.up)}comfy${comfyDl() ? ' <b>⇣dl</b>' : ''}</span>` +
+    `<span class="tb-item">${dot(S.memory?.ok)}memory <b>${S.memory?.ledger?.counts?.pending ?? '—'}</b></span>`
   const sys = S.system
   if (sys) {
     const pressure = sys.freeMB < 500 ? 'style="color:var(--red)"' : sys.freeMB < 1500 ? 'style="color:var(--yellow)"' : ''
@@ -220,6 +238,28 @@ function renderTopbar() {
       `<span class="tb-item">swap <b>${gb(sys.swapUsedMB)}</b></span>` +
       `<span class="tb-item">load <b>${sys.load}</b></span>`
   }
+}
+
+function renderCommand() {
+  const box = $('command-library')
+  if (!box) return
+  const catalog = S.catalog
+  if (!catalog) { box.innerHTML = '<div class="empty">waiting for Quorum catalog…</div>'; return }
+  const available = catalog.runtimes.filter(r => r.available).length
+  $('command-connection').textContent = `${available}/${catalog.runtimes.length} runtimes ready · ${catalog.config.projectCount} project roots · no secrets exposed`
+  const rooms = S.projects?.rooms || []
+  $('command-pulse').innerHTML = `<div class="command-stat"><b>${rooms.length}</b><span>project rooms</span></div><div class="command-stat"><b>${(S.sessions?.cards || []).filter(s => s.active).length}</b><span>active sessions</span></div><div class="command-stat"><b>${catalog.models.length}</b><span>catalog models</span></div><div class="command-stat"><b>${S.feed.length}</b><span>audit events</span></div>`
+  box.innerHTML = catalog.runtimes.map(runtime => `<article class="command-card ${runtime.available ? 'ready' : 'offline'}"><div class="pet-mini ${esc(runtime.id)}">✦</div><div class="command-card-copy"><h3>${esc(runtime.label)} <span>${runtime.available ? 'ready' : 'offline'}</span></h3><p>${esc(runtime.kind)} · ${esc(runtime.capabilities.join(' · '))}</p><small>${runtime.authReady ? 'auth available via local environment' : 'auth not reported / optional'}</small></div><button type="button" data-command-launch="${esc(runtime.id)}" ${runtime.available && runtime.command && rooms.length ? '' : 'disabled'}>preview launch</button></article>`).join('')
+  for (const button of box.querySelectorAll('[data-command-launch]')) button.onclick = () => {
+    const roomId = S.selectedRoom || rooms[0]?.id
+    if (!roomId) return
+    send({ type: 'command.preview', action: 'launch', runtimeId: button.dataset.commandLaunch, roomId })
+    $('command-preview').textContent = `preparing ${button.dataset.commandLaunch} → ${roomId}`
+    $('command-actions').innerHTML = `<button type="button" id="command-confirm">confirm launch</button><button type="button" id="command-cancel" class="danger">cancel</button>`
+    $('command-confirm').onclick = () => send({ type: 'command.execute', action: 'launch', runtimeId: button.dataset.commandLaunch, roomId, confirm: true })
+    $('command-cancel').onclick = () => { $('command-actions').innerHTML = ''; $('command-preview').textContent = 'action cancelled' }
+  }
+  if (S.commandPreview) { $('command-preview').textContent = S.commandPreview.summary; $('command-actions').innerHTML = `<button type="button" id="command-confirm">confirm action</button>`; $('command-confirm').onclick = () => send({ type: 'command.execute', ...S.commandPreview, confirm: true }) }
 }
 const comfyDl = () => (S.processes?.procs || []).some(p => p.group === 'comfy' && p.name?.startsWith('hf ⇣'))
 
@@ -508,6 +548,7 @@ function renderDeck() {
     deckStat('sessions', `${activeSessions}/${sessions.length}`),
     deckStat('processes', String(S.processes?.procs?.length || 0)),
     deckStat('rooms', String(rooms.length)),
+    deckStat('memory', S.memory?.ledger?.counts ? `${S.memory.ledger.counts.pending} pending` : '—'),
     deckStat('websocket', ws?.readyState === 1 ? 'live' : 'wait'),
   ].join('')
 
@@ -714,11 +755,11 @@ function renderSystem() {
     const total = hist[hist.length - 1].totalMB || 24576
     const x = i => i / (hist.length - 1) * w
     const y = v => h - (v / total) * h
-    area(ctx, hist, x, i => y(hist[i].usedMB), '#33507a88')
-    area(ctx, hist, x, i => y(hist[i].usedMB + hist[i].compMB), '#7a4fa055')
-    line(ctx, hist, x, i => y(total - hist[i].freeMB), '#f8717188')
-    ctx.fillStyle = '#454f68'; ctx.font = '9px monospace'
-    ctx.fillText(gb(total) + ' total · blue=used purple=+comp red=total−free', 4, 10)
+    area(ctx, hist, x, i => y(hist[i].usedMB), 'rgba(114, 212, 255, 0.32)')
+    area(ctx, hist, x, i => y(hist[i].usedMB + hist[i].compMB), 'rgba(167, 139, 250, 0.20)')
+    line(ctx, hist, x, i => y(total - hist[i].freeMB), 'rgba(251, 113, 133, 0.62)')
+    ctx.fillStyle = '#8e96a8'; ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace'
+    ctx.fillText(gb(total) + ' total · cyan=used violet=+comp red=pressure', 4, 10)
   }
 
   const [ctx2, w2, h2] = setupCanvas($('swapchart'))
@@ -726,13 +767,13 @@ function renderSystem() {
   if (hist.length > 1) {
     const max = Math.max(10, ...hist.map(s => s.soRate))
     const bw = w2 / hist.length
-    ctx2.fillStyle = '#fb923c99'
+    ctx2.fillStyle = 'rgba(245, 158, 11, 0.55)'
     hist.forEach((s, i) => {
       if (!s.soRate) return
       const bh = (s.soRate / max) * (h2 - 10)
       ctx2.fillRect(i * bw, h2 - bh, Math.max(1, bw - .5), bh)
     })
-    ctx2.fillStyle = '#454f68'; ctx2.font = '9px monospace'
+    ctx2.fillStyle = '#8e96a8'; ctx2.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace'
     ctx2.fillText(`swapouts/s (peak ${max | 0})`, 4, 9)
   }
 }
@@ -773,11 +814,20 @@ function renderServices() {
     row('platform', esc(hm.detail?.platform || '—')) + row('processes', hprocs)
 
   const a = sv.auth || {}
+  const runtimeState = info => !info?.cli
+    ? '<span style="color:var(--red)">CLI missing</span>'
+    : !info.configured
+      ? '<span style="color:var(--yellow)">sign in required</span>'
+      : '<span style="color:var(--green)">ready</span>'
   $('auth-card').innerHTML =
-    row('claude', a.claude ? '✓ ~/.claude' : '—') +
-    row('codex', a.codex ? `✓ ${esc(a.codex.mode)}` : '<span style="color:var(--red)">missing</span>') +
+    row('claude', runtimeState(a.claude)) +
+    row('API key', a.anthropic?.apiKeyAvailable
+      ? '<span style="color:var(--green)">available to this local process</span>'
+      : '<span style="color:var(--dim)">not in this process environment</span>') +
+    row('codex', runtimeState(a.codex) + (a.codex?.configured ? ` · ${esc(a.codex.mode)}` : '')) +
     (a.codex?.lastRefresh ? row('codex refresh', rel(Date.parse(a.codex.lastRefresh)) + ' ago') : '') +
-    row('hermes', a.hermes ? '✓ ~/.hermes' : '—')
+    row('hermes', runtimeState(a.hermes)) +
+    row('recovery', !a.claude?.cli ? 'install Claude Code to convene a table' : !a.claude.configured && !a.anthropic?.apiKeyAvailable ? 'sign in to Claude Code or restart Quorum with an API key' : 'local runtime checks only')
 }
 
 function renderProcs() {
@@ -812,8 +862,8 @@ function ensureTerm(id, profile) {
   $('terms').appendChild(mount)
   const term = new Terminal({
     fontSize: 12,
-    fontFamily: 'SF Mono, Menlo, monospace',
-    theme: { background: '#0b0e14', foreground: '#c8d0e0', cursor: '#5ac8fa' },
+    fontFamily: 'SF Mono, ui-monospace, Menlo, Monaco, Consolas, monospace',
+    theme: { background: '#08090d', foreground: '#d4dae4', cursor: '#72d4ff', selectionBackground: '#72d4ff33' },
     scrollback: 4000,
   })
   const fit = new FitAddon.FitAddon()
@@ -999,6 +1049,30 @@ function renderComposio() {
       rows.push(row(st.toLowerCase(), [...new Set(byStatus[st])].map(esc).join(', ')))
     }
   }
+  box.innerHTML = rows.join('')
+}
+
+/* ── shared agent memory control ───────────────────────── */
+function renderMemory() {
+  const m = S.memory
+  const head = $('memory-summary')
+  const box = $('memory-card')
+  if (!head || !box) return
+  if (!m) { head.textContent = ''; box.innerHTML = '<div class="empty-sm">—</div>'; return }
+
+  const counts = m.ledger?.counts || { pending: 0, promoted: 0, archived: 0, total: 0 }
+  head.innerHTML = m.ok
+    ? `<b>${counts.pending}</b> pending · ${counts.promoted} promoted`
+    : `<span class="warn">${esc((m.health || []).join(', ') || 'check')}</span>`
+
+  const rows = []
+  rows.push(row('policy', esc(m.policy || 'review-first')))
+  rows.push(row('source', `${m.source?.localOnly ? 'loopback' : 'CHECK'} ${esc(m.source?.url || '—')}`))
+  rows.push(row('allowlist', esc((m.projects || []).join(', ') || '—')))
+  rows.push(row('ledger', `${counts.total} total · cursor ${esc(m.ledger?.cursorHighestId ?? 0)}`))
+  rows.push(row('inbox', `${m.inbox?.observationMarkers ?? 0} markers · ${m.inbox?.exists ? 'present' : 'missing'}`))
+  rows.push(row('status note', m.statusNote?.exists ? `updated ${esc(m.statusNote.updatedAt || '—')}` : '<span class="warn">missing</span>'))
+  if (m.health?.length) rows.push(row('health', `<span class="warn">${esc(m.health.join(', '))}</span>`))
   box.innerHTML = rows.join('')
 }
 
@@ -1225,6 +1299,22 @@ function renderRoomSelect() {
   else if (S.selectedRoom) sel.value = S.selectedRoom
 }
 
+function renderAuthMode() {
+  const select = $('rt-auth-mode')
+  if (!select) return
+  const auth = S.services?.auth || {}
+  const cliReady = auth.claude?.cli && auth.claude?.configured
+  const apiKeyReady = auth.claude?.cli && auth.anthropic?.apiKeyAvailable
+  const previous = select.value || 'auto'
+  select.innerHTML =
+    `<option value="auto" ${!cliReady && !apiKeyReady ? 'disabled' : ''}>automatic — ${cliReady ? 'signed-in CLI preferred' : apiKeyReady ? 'API key fallback' : 'unavailable'}</option>` +
+    `<option value="cli" ${cliReady ? '' : 'disabled'}>Claude Code account${cliReady ? '' : ' — sign-in required'}</option>` +
+    `<option value="api-key" ${apiKeyReady ? '' : 'disabled'}>API key from Quorum’s environment${apiKeyReady ? '' : ' — unavailable'}</option>`
+  select.value = [...select.options].some(o => o.value === previous && !o.disabled)
+    ? previous
+    : 'auto'
+}
+
 /**
  * A pre-flight number, not a bill. Turn count is exact (1 brief + 3 per
  * participant + 1 verdict); the dollar figure is a measured average and is
@@ -1249,7 +1339,7 @@ function renderEstimate() {
 
 function renderRoundtable() {
   if (S.view !== 'table') { renderMascot(); return }
-  renderRoomSelect(); renderEstimate(); renderMascot()
+  renderRoomSelect(); renderAuthMode(); renderEstimate(); renderMascot()
 
   const d = S.debate
   const live = d && !d.endedAt
@@ -1446,6 +1536,7 @@ function renderArchive() {
         roomId: $('rt-room').value || null,
         participants: [...S.seated],
         model: $('rt-model').value,
+        authMode: $('rt-auth-mode').value,
       })
       renderRoundtable()
     }
@@ -1461,8 +1552,8 @@ function renderArchive() {
 function renderAll() {
   setView(S.view)
   renderTopbar(); renderSessions(); renderSystem(); renderServices(); renderProcs(); renderFeed()
-  renderOffice(); renderRoomDetail(); renderDeck()
-  renderBoard(); renderComposio(); renderAgents(); renderAvatars()
+  renderOffice(); renderRoomDetail(); renderDeck(); renderCommand()
+  renderBoard(); renderComposio(); renderMemory(); renderAgents(); renderAvatars()
   renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderArchive()
   renderEdition()
 }
@@ -1563,5 +1654,5 @@ function tourEnd() {
   window.addEventListener('resize', () => { if (tourStep >= 0) tourShow() })
   // First visit only. The snapshot handler fires once real data is on screen,
   // so the tour points at populated rooms rather than loading spinners.
-  if (!localStorage.getItem('quorum-tour-done')) setTimeout(tourStart, 1200)
+  if (!localStorage.getItem('quorum-tour-done') && S.view === 'office') setTimeout(tourStart, 1200)
 }

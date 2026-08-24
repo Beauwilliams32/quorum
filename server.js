@@ -7,18 +7,22 @@ import { WebSocketServer } from 'ws'
 import { State } from './src/state.js'
 import { startProcesses } from './src/collectors/processes.js'
 import { startSessions, TranscriptWatcher } from './src/collectors/sessions.js'
-import { startServices } from './src/collectors/services.js'
+import { startServices, readAuth, resolveRoundtableAuth } from './src/collectors/services.js'
 import { startSystem } from './src/collectors/system.js'
 import { startProjects, resolveProjectId } from './src/collectors/projects.js'
 import { startTasks } from './src/collectors/tasks.js'
 import { startComposio } from './src/collectors/composio.js'
 import { startAgents } from './src/collectors/agents.js'
+import { startMemory } from './src/collectors/memory.js'
 import { stampPresence } from './src/presence.js'
 import { PtyManager } from './src/pty.js'
 import { withinDir, isAllowedOrigin } from './src/util.js'
 import { buildHealth } from './src/health.js'
 import { publicCast } from './src/cast.js'
 import { loadEdition, editionInfo } from './src/edition.js'
+import { loadRuntimes, loadModels } from './src/config.js'
+import { buildCatalog, publicCatalog } from './src/catalog.js'
+import { executeAction, previewAction } from './src/command.js'
 import { RoundtableRegistry, EST_COST_PER_TURN_USD } from './src/roundtable.js'
 import { debateToMarkdown } from './src/decision-record.js'
 
@@ -53,6 +57,35 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/api/state') {
     res.setHeader('content-type', 'application/json')
     return res.end(JSON.stringify({ ...state.data, feed: state.feed, roundtables: roundtables.list() }, null, 1))
+  }
+  if (u.pathname === '/api/catalog') {
+    res.setHeader('content-type', 'application/json')
+    res.setHeader('cache-control', 'no-store')
+    return res.end(JSON.stringify(publicCatalog(buildCatalog())))
+  }
+  if (u.pathname === '/api/command') {
+    if (req.method !== 'POST') { res.statusCode = 405; return res.end('method not allowed') }
+    let body = ''
+    req.on('data', chunk => { body += chunk })
+    req.on('end', () => {
+      try {
+        const input = JSON.parse(body || '{}')
+        const preview = previewAction(input, buildCatalog(), state, ptys)
+        const result = input.confirm === true ? executeAction(preview, input, { state, ptys, startPty: (profile, roomId) => {
+          const room = (state.data.projects?.rooms || []).find(r => r.id === roomId)
+          const rec = ptys.create(profile, room?.cwd, 120, 30)
+          try { stampPresence({ projectId: room?.id, agent: profile, ptyId: rec.id, cwd: rec.cwd }) } catch { /* best-effort */ }
+          return rec
+        } }) : { ok: false, requiresConfirmation: true }
+        res.setHeader('content-type', 'application/json')
+        return res.end(JSON.stringify({ preview, ...result }))
+      } catch (error) {
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json')
+        return res.end(JSON.stringify({ error: String(error.message || error) }))
+      }
+    })
+    return
   }
   // A debate is only worth what survives it, so every table is exportable as a
   // decision record you can drop into a repo or a vault next to the code.
@@ -91,6 +124,21 @@ const wss = new WebSocketServer({
   verifyClient: ({ origin }) => isAllowedOrigin(origin, PORT),
 })
 
+let startupErrorHandled = false
+function failStartup(error) {
+  if (startupErrorHandled) return
+  startupErrorHandled = true
+  if (error?.code === 'EADDRINUSE') {
+    console.error(`Quorum cannot start: 127.0.0.1:${PORT} is already in use. Stop the duplicate local instance, then retry.`)
+  } else {
+    console.error(`Quorum failed to start: ${error?.message || error}`)
+  }
+  process.exitCode = 1
+  setImmediate(() => process.exit(1))
+}
+server.once('error', failStartup)
+wss.once('error', failStartup)
+
 wss.on('connection', ws => {
   state.clients.add(ws)
   ws.send(JSON.stringify(state.snapshot()))
@@ -102,6 +150,12 @@ wss.on('connection', ws => {
     cast: publicCast(editionInfo().locked),
     edition: editionInfo(),
     estCostPerTurnUsd: EST_COST_PER_TURN_USD,
+    // Launchable runtimes + debate models, built-ins plus the user's config —
+    // the client renders its buttons and pickers from these, never a hardcoded
+    // list, so "add gemini to config.json" is the entire integration story.
+    runtimes: loadRuntimes().map(r => ({ id: r.id, label: r.label, builtin: !!r.builtin })),
+    models: loadModels(),
+    catalog: publicCatalog(buildCatalog()),
   }))
   ws.send(JSON.stringify({ type: 'rt.list', ...roundtables.list() }))
   const watcher = new TranscriptWatcher(ws)
@@ -150,6 +204,23 @@ function handle(ws, m, watcher) {
     case 'proc.kill': killProc(m.pid); break
     case 'rt.start': startRoundtable(m); break
     case 'rt.cancel': roundtables.cancel(String(m.id || '')); break
+    case 'command.preview': {
+      const preview = previewAction(m, buildCatalog(), state, ptys)
+      ws.send(JSON.stringify({ type: 'command.preview', preview }))
+      break
+    }
+    case 'command.execute': {
+      const preview = previewAction(m, buildCatalog(), state, ptys)
+      const result = executeAction(preview, m, { state, ptys, startPty: (profile, roomId) => {
+        const room = (state.data.projects?.rooms || []).find(r => r.id === roomId)
+        if (!room) throw new Error('unknown project room')
+        const rec = ptys.create(profile, room.cwd, m.cols || 120, m.rows || 30)
+        ptys.attach(rec.id, ws)
+        return rec
+      } })
+      ws.send(JSON.stringify({ type: 'command.done', preview, result }))
+      break
+    }
   }
 }
 
@@ -167,6 +238,10 @@ function startRoundtable(m) {
     throw new Error(`${blocked.join(', ')} ${blocked.length > 1 ? 'are' : 'is'} part of Quorum Pro — unlock or seat someone else`)
 
   const room = (state.data.projects?.catalog || []).find(r => r.id === m.roomId) || null
+  // Resolve auth at the spend boundary, rather than trusting the five-second
+  // collector snapshot or a browser-provided claim. The function returns only
+  // a mode label, never a credential.
+  const authMode = resolveRoundtableAuth(readAuth(), m.authMode)
   const rt = roundtables.start({
     topic: m.topic,
     roomId: room?.id || null,
@@ -174,6 +249,7 @@ function startRoundtable(m) {
     cwd: room?.cwd || null,
     participants: m.participants,
     model: m.model,
+    authMode,
   })
   return rt
 }
@@ -227,6 +303,7 @@ startProjects(state)
 startTasks(state)
 startComposio(state)
 startAgents(state)
+startMemory(state)
 
 // The edition is resolved before the socket opens: a client that connected
 // mid-load would cache a free cast for the life of the page and a paying user
