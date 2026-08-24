@@ -5,7 +5,8 @@ import fs from "node:fs";
 
 // The hosted Sites workspace may provide private bindings here, but the
 // standalone public package must build without that file.
-const hostingConfig = fs.existsSync(new URL("./.openai/hosting.json", import.meta.url))
+const hasHostingConfig = fs.existsSync(new URL("./.openai/hosting.json", import.meta.url));
+const hostingConfig = hasHostingConfig
   ? JSON.parse(fs.readFileSync(new URL("./.openai/hosting.json", import.meta.url), "utf8"))
   : {};
 
@@ -55,7 +56,7 @@ export default defineConfig(async () => {
       : undefined,
     plugins: [
       vinext(),
-      sites(),
+      ...(hasHostingConfig ? [sites()] : []),
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: localBindingConfig,
