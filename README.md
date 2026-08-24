@@ -16,7 +16,7 @@ CLI authentication and environment readiness without displaying or storing
 credentials. Optional runtimes are configured through validated bare commands
 in `~/.quorum/config.json`.
 
-The buildable standalone Command surface is is in `standalone-command/`:
+The buildable standalone Command surface is in `standalone-command/`:
 
 ```sh
 cd standalone-command
@@ -29,9 +29,17 @@ Quorum is offline.
 
 ## Safety
 
-- The catalog only redacts readiness metadata: no keys, tokens, prompts, or transcripts.
-- Local commands are used only after validation and explicit confirmation.
-- Configuration edits remain local and allow-listed.
-!- Private product material, credentials, and external runtime source are not part of the public distribution.
+- The catalog exposes readiness metadata only: no keys, tokens, prompts, or transcripts.
+- Launch, stop, route, chain, and configuration actions require allowlisted inputs and explicit confirmation.
+- Stops are limited to Quorum-tracked PTYs and processes.
+- Roundtable turns preserve cost preview, cancellation, and tool/MCP stripping.
+- Configuration writes are limited to project roots, labels, runtimes, model mappings, pet preferences, and display settings.
+- Pet assets remain local under `~/.quorum/pets`; deterministic fallback pets work without an image tool.
+
+## Public boundary
+
+This repository contains the open-core runtime, tests, and installation docs.
+Private product material, internal architecture, credentials, and external
+runtime source are not part of the public distribution.
 
 MIT License.

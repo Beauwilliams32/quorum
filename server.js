@@ -25,6 +25,7 @@ import { buildCatalog, publicCatalog } from './src/catalog.js'
 import { executeAction, previewAction } from './src/command.js'
 import { RoundtableRegistry, EST_COST_PER_TURN_USD } from './src/roundtable.js'
 import { debateToMarkdown } from './src/decision-record.js'
+import { buildOperations } from './src/operations.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT || 4747)
@@ -62,6 +63,11 @@ const server = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json')
     res.setHeader('cache-control', 'no-store')
     return res.end(JSON.stringify(publicCatalog(buildCatalog())))
+  }
+  if (u.pathname === '/api/operations') {
+    res.setHeader('content-type', 'application/json')
+    res.setHeader('cache-control', 'no-store')
+    return res.end(JSON.stringify(buildOperations(state.data, state.feed, ptys.list(), publicCatalog(buildCatalog()))))
   }
   if (u.pathname === '/api/command') {
     if (req.method !== 'POST') { res.statusCode = 405; return res.end('method not allowed') }
