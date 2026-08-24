@@ -19,7 +19,7 @@ test("server-renders the Trident Command portfolio", async () => {
   assert.match(html, /<title>Trident Command — Studio Portfolio<\/title>/i);
   assert.match(html, /Everything in motion/);
   assert.match(html, /Project landscape/);
-  assert.match(html, /Quorum/);
+  assert.match(html, /Core Runtime/);
   assert.match(html, /Project landscape/);
   assert.doesNotMatch(html, /Your site is taking shape|codex-preview|react-loading-skeleton/i);
 });
@@ -33,11 +33,12 @@ test("the local operator bridge and downloader path are documented", async () =>
   ]);
   assert.match(route, /127\.0\.0\.1:4747/);
   assert.match(route, /\/api\/state/);
+  assert.match(route, /\/api\/operations/);
   assert.match(route, /method:\"POST\"/);
   assert.match(readme, /npm run local/);
   assert.match(readme, /Quorum/);
   assert.match(packageJson, /"local": "npm run build && npm start"/);
-  assert.match(page, /Unified AI Operator/);
+  assert.match(page, /Operator cockpit/);
   assert.match(page, /fetch\("\/api\/quorum"\)/);
   assert.match(page, /Preview launch/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
