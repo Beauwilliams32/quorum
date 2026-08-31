@@ -25,6 +25,16 @@ const S = {
   cast: [],
   castById: new Map(),
   edition: { tier: 'free', reason: '' },
+  // Launchable agent CLIs and debate models, both sent by the server from
+  // config. Seeded with the built-ins so the buttons are never empty during
+  // the gap between page load and the first websocket frame.
+  runtimes: [
+    { id: 'claude', label: 'claude', builtin: true },
+    { id: 'codex', label: 'codex', builtin: true },
+    { id: 'hermes', label: 'hermes', builtin: true },
+    { id: 'shell', label: 'zsh', builtin: true },
+  ],
+  models: ['sonnet', 'opus', 'haiku'],
   estCostPerTurn: 0.08,
   // Which characters are seated at the table being configured. Persisted so a
   // reload does not silently re-seat a different, more expensive lineup.
@@ -130,6 +140,8 @@ const handlers = {
     S.castById = new Map(S.cast.map(c => [c.id, c]))
     S.edition = m.edition || { tier: 'free', reason: '' }
     S.catalog = m.catalog || S.catalog
+    if (Array.isArray(m.runtimes) && m.runtimes.length) S.runtimes = m.runtimes
+    if (Array.isArray(m.models) && m.models.length) S.models = m.models
     if (m.estCostPerTurnUsd) S.estCostPerTurn = m.estCostPerTurnUsd
     // A stored lineup from a previous Pro session must not survive a licence
     // lapsing, or "convene" fails server-side with no visible cause.
@@ -138,7 +150,7 @@ const handlers = {
       if (!c || c.locked) S.seated.delete(id)
     }
     persistSeated()
-    renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderEdition()
+    renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderEdition(); renderRuntimes()
     renderCommand()
   },
   'command.preview'(m) { S.commandPreview = m.preview; renderCommand() },
@@ -506,8 +518,11 @@ function renderRoomDetail() {
     }
 }
 
-for (const b of document.querySelectorAll('#room-spawn-actions button'))
-  b.onclick = () => {
+// Delegated, not bound per button: the button set is re-rendered whenever the
+// runtime list changes, and per-element handlers would be orphaned by that.
+$('room-spawn-actions').addEventListener('click', e => {
+  const b = e.target.closest('button[data-profile]')
+  if (b) {
     if (!S.selectedCwd) return
     $('drawer').classList.remove('collapsed')
     send({
@@ -519,6 +534,7 @@ for (const b of document.querySelectorAll('#room-spawn-actions button'))
       rows: 30,
     })
   }
+})
 
 /* ── 3D command deck ───────────────────────────────────── */
 function renderDeck() {
@@ -674,6 +690,37 @@ function renderDeckSessions() {
   for (const item of box.querySelectorAll('.deck-session')) {
     item.onclick = () => selectSession(item.dataset.file, item.dataset.agent, item.dataset.cwd)
     item.ondblclick = () => { selectSession(item.dataset.file, item.dataset.agent, item.dataset.cwd); setView('radar') }
+  }
+}
+
+/* ── runtimes + models come from config, never a hardcoded list ────────
+ *
+ * This is the whole "integrate any agent" story: a `runtimes` entry in
+ * ~/.quorum/config.json (gemini, aider, goose, an internal wrapper) becomes a
+ * button here, and a `models` entry becomes a roundtable option. The server
+ * validates the command before it ever reaches this list — see src/validate.js.
+ */
+function renderRuntimes() {
+  const btns = S.runtimes.map(r =>
+    `<button type="button" data-profile="${esc(r.id)}"${r.builtin ? '' : ' class="custom" title="from your config"'}>+ ${esc(r.label)}</button>`
+  ).join('')
+
+  // Room spawn buttons keep their disabled state — they need a selected room.
+  const room = $('room-spawn-actions')
+  if (room) {
+    room.innerHTML = btns
+    for (const b of room.querySelectorAll('button')) b.disabled = !S.selectedCwd
+  }
+  const term = $('term-actions')
+  if (term) term.innerHTML = btns
+
+  const sel = $('rt-model')
+  if (sel) {
+    const current = sel.value
+    const LABEL = { sonnet: 'sonnet — balanced', opus: 'opus — deepest, priciest', haiku: 'haiku — fastest, cheapest' }
+    sel.innerHTML = S.models.map(m =>
+      `<option value="${esc(m)}">${esc(LABEL[m] || m)}</option>`).join('')
+    if (S.models.includes(current)) sel.value = current
   }
 }
 
@@ -926,8 +973,9 @@ function renderTabs() {
     }
 }
 
-for (const b of document.querySelectorAll('#term-actions button'))
-  b.onclick = () => {
+$('term-actions').addEventListener('click', e => {
+  const b = e.target.closest('button[data-profile]')
+  if (b) {
     $('drawer').classList.remove('collapsed')
     send({
       type: 'pty.create',
@@ -938,6 +986,7 @@ for (const b of document.querySelectorAll('#term-actions button'))
       rows: 30,
     })
   }
+})
 
 /* drawer resize + toggle */
 {
@@ -1550,6 +1599,7 @@ function renderArchive() {
 }
 
 function renderAll() {
+  renderRuntimes()
   setView(S.view)
   renderTopbar(); renderSessions(); renderSystem(); renderServices(); renderProcs(); renderFeed()
   renderOffice(); renderRoomDetail(); renderDeck(); renderCommand()

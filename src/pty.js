@@ -1,10 +1,20 @@
 import os from 'node:os'
 import pty from 'node-pty'
+import { loadRuntimes } from './config.js'
 
 // One-keystroke launch profiles. Agent CLIs run inside an interactive login zsh
 // so they inherit the user's full PATH and (crucially) the machine's shared
-// credentials: ~/.claude, ~/.codex/auth.json, ~/.hermes — no auth plumbing needed.
-const CMDS = { claude: 'claude', hermes: 'hermes', codex: 'codex' }
+// credentials: ~/.claude, ~/.codex/auth.json, ~/.hermes — no auth plumbing
+// needed. The profile list is the built-ins plus any `runtimes` from
+// ~/.quorum/config.json — gemini, aider, goose, anything with a CLI — which is
+// how "integrate any agent" works without Quorum knowing each one. Resolved at
+// spawn time so a config edit applies to the next terminal, not the next boot.
+// The command string is validated at config load (bare program name only, no
+// shell metacharacters) because it is about to be executed.
+function commandFor(profile) {
+  const rt = loadRuntimes().find(r => r.id === profile)
+  return rt ? rt.command : 'true'
+}
 const SCROLLBACK = 200_000
 
 let seq = 0
@@ -19,8 +29,8 @@ export class PtyManager {
   // (never from raw client text) — see buildResumeCommand in server.js.
   create(profile = 'shell', cwd, cols = 120, rows = 30, command = null) {
     const shell = process.env.SHELL || '/bin/zsh'
-    const cli = command || CMDS[profile] || 'true'
-    const args = profile === 'shell' && !command ? ['-l'] : ['-l', '-i', '-c', cli]
+    const cli = command || commandFor(profile)
+    const args = profile === 'shell' && !command ? ['-l'] : ['-l', '-i', '-c', cli || 'true']
     // Strip CLAUDE* vars: this server may itself run under a Claude session and
     // a spawned `claude` must not think it's nested.
     const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' }
