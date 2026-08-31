@@ -6,9 +6,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "check": "node --check server.js && node --check src/state.js && node --check src/health.js && node --check src/pty.js && node --check src/util.js && node --check src/presence.js && node --check src/paths.js && node --check src/config.js && node --check src/licence.js && node --check src/edition.js && node --check src/cast-locked.js && node --check src/cast.js && node --check src/roundtable.js && node --check src/decision-record.js && node --check src/collectors/processes.js && node --check src/collectors/sessions.js && node --check src/collectors/services.js && node --check src/collectors/system.js && node --check src/collectors/projects.js && node --check src/collectors/tasks.js && node --check src/collectors/composio.js && node --check src/collectors/agents.js && node --check public/app.js && node --check public/art.js",
     "test": "node --test test/*.test.mjs",
-    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true"
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
+    "check": "node --check server.js && node --check src/state.js && node --check src/health.js && node --check src/pty.js && node --check src/util.js && node --check src/presence.js && node --check src/paths.js && node --check src/config.js && node --check src/validate.js && node --check src/licence.js && node --check src/edition.js && node --check src/cast-locked.js && node --check src/cast.js && node --check src/roundtable.js && node --check src/decision-record.js && node --check src/collectors/processes.js && node --check src/collectors/sessions.js && node --check src/collectors/services.js && node --check src/collectors/system.js && node --check src/collectors/projects.js && node --check src/collectors/tasks.js && node --check src/collectors/composio.js && node --check src/collectors/agents.js && node --check src/collectors/memory.js && node --check public/app.js && node --check public/art.js && node --check scripts/bootstrap.mjs",
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "install:local": "bash scripts/install.sh"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

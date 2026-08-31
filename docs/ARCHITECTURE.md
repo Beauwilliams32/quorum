@@ -73,7 +73,7 @@ sends one.
 | `snapshot` | On connect — full state + feed |
 | `update` | A collector refreshed one key (`{key, data}`) |
 | `event` | Feed item (spawn/exit/kill/up/down) |
-| `cast` | On connect — public cast (prompts stripped), edition info, per-turn cost estimate |
+| `cast` | On connect — public cast (prompts stripped), edition info, per-turn cost estimate, launchable `runtimes` and roundtable `models` from config |
 | `rt.list` | On connect — live + recent debates |
 | `rt.update` / `rt.turn` / `rt.speaking` / `rt.done` | Debate lifecycle |
 | `pty.list` / `pty.attach` / `pty.data` / `pty.exit` | Terminal lifecycle |
@@ -94,9 +94,11 @@ sends one.
 | `State#broadcast(msg)` | JSON to every open client |
 
 ### `pty.js` — terminals
-One-keystroke launch profiles (`claude`, `hermes`, `codex`, `shell`) inside an
-interactive login zsh so agent CLIs inherit the machine's credentials. `CLAUDE*`
-env vars are stripped so a spawned `claude` doesn't think it's nested.
+One-keystroke launch profiles inside an interactive login zsh so agent CLIs
+inherit the machine's credentials. `CLAUDE*` env vars are stripped so a spawned
+`claude` doesn't think it's nested. The profile set is the built-ins plus any
+`runtimes` from config, resolved at spawn time (`commandFor`) so a config edit
+applies to the next terminal rather than the next boot.
 | Export | Does |
 |---|---|
 | `PtyManager#create(profile, cwd, cols, rows, command?)` | Spawn; `command` is server-built only (chat resume), never raw client text |
@@ -113,6 +115,25 @@ without a restart. `loadConfig()`, `defaultRoots()` (~/CLAUDE, ~/code, ~/dev, �
 falling back to $HOME), `discoverProjects(roots)` (marker files: .git,
 package.json, CLAUDE.md, wrangler.toml, Cargo.toml, pyproject.toml, go.mod,
 Makefile, .claude), `slug()`.
+
+Also owns the pluggable surfaces: `BUILTIN_RUNTIMES` / `loadRuntimes()` (agent
+CLIs — built-ins plus config entries, built-in ids not overridable so a config
+cannot silently rebind `claude` to another binary) and `BUILTIN_MODELS` /
+`loadModels()` (roundtable model choices). Both cross to the browser in the
+`cast` frame; the client renders its buttons and pickers from them rather than
+from any hardcoded list, which is the entire "integrate any agent" mechanism.
+
+### `validate.js` — the gate for machine-written configuration
+Everything Quorum did not hand-write passes through here: the bootstrap's
+proposal and Pro's custom personas. Each validator returns
+`{ ok, value, errors }` and never throws — a bad generated file must degrade to
+"rejected, with reasons", never take the cockpit down or half-apply.
+
+| Export | Guards |
+|---|---|
+| `validateConfig(raw)` | Whole-file shape; reports each malformed section separately so the author can find it; one bad runtime invalidates the whole config rather than slipping through beside valid ones |
+| `validateRuntime(r)` | **Security-critical.** The command is executed via `zsh -lic <cmd>`, so it must be a bare program name or absolute path — no arguments, no `; && \| $() \`\` > & ~ *` or newlines. This is the line between "add your own agent" and "config file runs arbitrary shell" |
+| `validatePersona(raw)` | Palette values regex-checked as hex because they are interpolated into SVG attributes; prompts under 80 chars refused (too short to argue) |
 
 ### `util.js`
 `sh()` (execFile→stdout, '' on error), `tailBytes()`, `withinDir()` (separator-
@@ -253,7 +274,29 @@ is the ring's 9999px box-shadow so the target stays at full brightness).
 | File | Does |
 |---|---|
 | `issue-licence.mjs` | Signs a licence with the key at `~/.quorum/keys/` (in no repo); stdout-composable for fulfilment |
+| `install.sh` *(public)* | The one-line installer. Preflights node/git/claude, clones or fast-forwards `~/.quorum/app`, installs, then runs check + tests — an installer that says "done" without checking has only moved the failure to first run |
+| `bootstrap.mjs` *(public)* | Proposes a config from machine evidence (see below). Dry-run by default; `--apply` backs up, writes, re-validates from disk, then runs the suite |
 | `build-open-core.mjs` | Produces the public tree from an **allow-list** (nothing ships unless named), appends gitignore guards, then scans its own output and exits 1 if a Pro file is present |
+
+## 7b. Bootstrap — configuration from evidence
+
+`npm run bootstrap` asks a model to propose a Quorum setup from how the machine
+is actually used, then routes the answer through the same validator a
+hand-written config passes.
+
+**What it sends.** Not transcripts. Derived signal only: which directories
+sessions have run in and how often (counted from `~/.claude/projects/*`
+directory names, which encode the cwd), which agent CLIs resolve on PATH, and
+the headings plus project-table rows of a workspace `CLAUDE.md`. That is enough
+to name and rank rooms without shipping private conversation content to an API
+call.
+
+**Why it is a dry run by default.** It writes the file that decides what the
+product shows. A generated config silently replacing a hand-tuned one is a
+data-loss bug wearing a feature's clothes. The flow is: propose → validate →
+print → (with `--apply`) back up → write → re-read and re-validate from disk →
+run `npm test`. An auto-adjustment that is not verified is just an unreviewed
+commit.
 
 ## 8. Data on disk
 
@@ -275,6 +318,7 @@ is the ring's 9999px box-shadow so the target stays at full brightness).
 | `licence.test.mjs` | wrong-key rejection, tamper detection, expiry semantics, info redaction |
 | `decision-record.test.mjs` | verdict-first layout, movement math, markdown escaping, malformed-input safety |
 | `config.test.mjs` | discovery markers/skips/labels, slug, cwd resolution vs catch-alls |
+| `validate.test.mjs` | The generated-config gate: shell-injection attempts in runtime commands, built-in shadowing, per-section error reporting, SVG-injection in palettes, non-throwing on hostile input |
 | `projects.test.mjs` | legacy id resolution, office seating |
 | `chat-send.test.mjs` | the chat-pty targeting bug class (extracts live source; keep the section markers it slices on) |
 | `health.test.mjs`, `util.test.mjs`, `deck.test.mjs` | health contract, origin/containment, Deck wiring |

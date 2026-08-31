@@ -13,12 +13,14 @@ import { startProjects, resolveProjectId } from './src/collectors/projects.js'
 import { startTasks } from './src/collectors/tasks.js'
 import { startComposio } from './src/collectors/composio.js'
 import { startAgents } from './src/collectors/agents.js'
+import { startMemory } from './src/collectors/memory.js'
 import { stampPresence } from './src/presence.js'
 import { PtyManager } from './src/pty.js'
 import { withinDir, isAllowedOrigin } from './src/util.js'
 import { buildHealth } from './src/health.js'
 import { publicCast } from './src/cast.js'
 import { loadEdition, editionInfo } from './src/edition.js'
+import { loadRuntimes, loadModels } from './src/config.js'
 import { RoundtableRegistry, EST_COST_PER_TURN_USD } from './src/roundtable.js'
 import { debateToMarkdown } from './src/decision-record.js'
 
@@ -102,6 +104,11 @@ wss.on('connection', ws => {
     cast: publicCast(editionInfo().locked),
     edition: editionInfo(),
     estCostPerTurnUsd: EST_COST_PER_TURN_USD,
+    // Launchable runtimes + debate models, built-ins plus the user's config —
+    // the client renders its buttons and pickers from these, never a hardcoded
+    // list, so "add gemini to config.json" is the entire integration story.
+    runtimes: loadRuntimes().map(r => ({ id: r.id, label: r.label, builtin: !!r.builtin })),
+    models: loadModels(),
   }))
   ws.send(JSON.stringify({ type: 'rt.list', ...roundtables.list() }))
   const watcher = new TranscriptWatcher(ws)
@@ -227,6 +234,7 @@ startProjects(state)
 startTasks(state)
 startComposio(state)
 startAgents(state)
+startMemory(state)
 
 // The edition is resolved before the socket opens: a client that connected
 // mid-load would cache a free cast for the life of the page and a paying user

@@ -8,7 +8,7 @@ const AVATAR_H = Math.round(LOD.avatar * 1.2)
 
 const S = {
   processes: null, sessions: null, services: null, system: null, projects: null,
-  tasks: null, composio: null, agents: null,
+  tasks: null, composio: null, agents: null, memory: null,
   hist: [], feed: [], selected: null, follow: true,
   terms: new Map(), activeTerm: null,
   // ?view= wins over the remembered view, so a view is linkable and a wedged
@@ -25,6 +25,16 @@ const S = {
   cast: [],
   castById: new Map(),
   edition: { tier: 'free', reason: '' },
+  // Launchable agent CLIs and debate models, both sent by the server from
+  // config. Seeded with the built-ins so the buttons are never empty during
+  // the gap between page load and the first websocket frame.
+  runtimes: [
+    { id: 'claude', label: 'claude', builtin: true },
+    { id: 'codex', label: 'codex', builtin: true },
+    { id: 'hermes', label: 'hermes', builtin: true },
+    { id: 'shell', label: 'zsh', builtin: true },
+  ],
+  models: ['sonnet', 'opus', 'haiku'],
   estCostPerTurn: 0.08,
   // Which characters are seated at the table being configured. Persisted so a
   // reload does not silently re-seat a different, more expensive lineup.
@@ -68,6 +78,7 @@ const handlers = {
     S.tasks = m.data.tasks || null
     S.composio = m.data.composio || null
     S.agents = m.data.agents || null
+    S.memory = m.data.memory || null
     S.system = m.data.system?.latest || null
     S.hist = m.data.system?.hist ? [...m.data.system.hist] : []
     S.feed = m.feed || []
@@ -88,6 +99,7 @@ const handlers = {
       if (m.key === 'tasks') { renderBoard(); renderTopbar(); renderAvatars(); renderDeck() }
       if (m.key === 'composio') renderComposio()
       if (m.key === 'agents') { renderAgents(); renderAvatars(); renderDeck() }
+      if (m.key === 'memory') { renderMemory(); renderTopbar(); renderDeck() }
     }
   },
   event(m) {
@@ -125,6 +137,8 @@ const handlers = {
     S.cast = m.cast || []
     S.castById = new Map(S.cast.map(c => [c.id, c]))
     S.edition = m.edition || { tier: 'free', reason: '' }
+    if (Array.isArray(m.runtimes) && m.runtimes.length) S.runtimes = m.runtimes
+    if (Array.isArray(m.models) && m.models.length) S.models = m.models
     if (m.estCostPerTurnUsd) S.estCostPerTurn = m.estCostPerTurnUsd
     // A stored lineup from a previous Pro session must not survive a licence
     // lapsing, or "convene" fails server-side with no visible cause.
@@ -133,7 +147,7 @@ const handlers = {
       if (!c || c.locked) S.seated.delete(id)
     }
     persistSeated()
-    renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderEdition()
+    renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderEdition(); renderRuntimes()
   },
 
   'rt.list'(m) {
@@ -210,7 +224,8 @@ function renderTopbar() {
     `<span class="tb-item">${dot((g.claude || 0) > 0)}claude <b>${g.claude || 0}</b></span>` +
     `<span class="tb-item">${dot(sv.hermes?.up)}hermes</span>` +
     `<span class="tb-item">${dot((g.codex || 0) > 0)}codex <b>${g.codex || 0}</b></span>` +
-    `<span class="tb-item">${dot(sv.comfy?.up)}comfy${comfyDl() ? ' <b>⇣dl</b>' : ''}</span>`
+    `<span class="tb-item">${dot(sv.comfy?.up)}comfy${comfyDl() ? ' <b>⇣dl</b>' : ''}</span>` +
+    `<span class="tb-item">${dot(S.memory?.ok)}memory <b>${S.memory?.ledger?.counts?.pending ?? '—'}</b></span>`
   const sys = S.system
   if (sys) {
     const pressure = sys.freeMB < 500 ? 'style="color:var(--red)"' : sys.freeMB < 1500 ? 'style="color:var(--yellow)"' : ''
@@ -466,8 +481,11 @@ function renderRoomDetail() {
     }
 }
 
-for (const b of document.querySelectorAll('#room-spawn-actions button'))
-  b.onclick = () => {
+// Delegated, not bound per button: the button set is re-rendered whenever the
+// runtime list changes, and per-element handlers would be orphaned by that.
+$('room-spawn-actions').addEventListener('click', e => {
+  const b = e.target.closest('button[data-profile]')
+  if (b) {
     if (!S.selectedCwd) return
     $('drawer').classList.remove('collapsed')
     send({
@@ -479,6 +497,7 @@ for (const b of document.querySelectorAll('#room-spawn-actions button'))
       rows: 30,
     })
   }
+})
 
 /* ── 3D command deck ───────────────────────────────────── */
 function renderDeck() {
@@ -508,6 +527,7 @@ function renderDeck() {
     deckStat('sessions', `${activeSessions}/${sessions.length}`),
     deckStat('processes', String(S.processes?.procs?.length || 0)),
     deckStat('rooms', String(rooms.length)),
+    deckStat('memory', S.memory?.ledger?.counts ? `${S.memory.ledger.counts.pending} pending` : '—'),
     deckStat('websocket', ws?.readyState === 1 ? 'live' : 'wait'),
   ].join('')
 
@@ -636,6 +656,37 @@ function renderDeckSessions() {
   }
 }
 
+/* ── runtimes + models come from config, never a hardcoded list ────────
+ *
+ * This is the whole "integrate any agent" story: a `runtimes` entry in
+ * ~/.quorum/config.json (gemini, aider, goose, an internal wrapper) becomes a
+ * button here, and a `models` entry becomes a roundtable option. The server
+ * validates the command before it ever reaches this list — see src/validate.js.
+ */
+function renderRuntimes() {
+  const btns = S.runtimes.map(r =>
+    `<button type="button" data-profile="${esc(r.id)}"${r.builtin ? '' : ' class="custom" title="from your config"'}>+ ${esc(r.label)}</button>`
+  ).join('')
+
+  // Room spawn buttons keep their disabled state — they need a selected room.
+  const room = $('room-spawn-actions')
+  if (room) {
+    room.innerHTML = btns
+    for (const b of room.querySelectorAll('button')) b.disabled = !S.selectedCwd
+  }
+  const term = $('term-actions')
+  if (term) term.innerHTML = btns
+
+  const sel = $('rt-model')
+  if (sel) {
+    const current = sel.value
+    const LABEL = { sonnet: 'sonnet — balanced', opus: 'opus — deepest, priciest', haiku: 'haiku — fastest, cheapest' }
+    sel.innerHTML = S.models.map(m =>
+      `<option value="${esc(m)}">${esc(LABEL[m] || m)}</option>`).join('')
+    if (S.models.includes(current)) sel.value = current
+  }
+}
+
 /* ── sessions ──────────────────────────────────────────── */
 function renderSessions() {
   const cards = S.sessions?.cards || []
@@ -714,11 +765,11 @@ function renderSystem() {
     const total = hist[hist.length - 1].totalMB || 24576
     const x = i => i / (hist.length - 1) * w
     const y = v => h - (v / total) * h
-    area(ctx, hist, x, i => y(hist[i].usedMB), '#33507a88')
-    area(ctx, hist, x, i => y(hist[i].usedMB + hist[i].compMB), '#7a4fa055')
-    line(ctx, hist, x, i => y(total - hist[i].freeMB), '#f8717188')
-    ctx.fillStyle = '#454f68'; ctx.font = '9px monospace'
-    ctx.fillText(gb(total) + ' total · blue=used purple=+comp red=total−free', 4, 10)
+    area(ctx, hist, x, i => y(hist[i].usedMB), 'rgba(114, 212, 255, 0.32)')
+    area(ctx, hist, x, i => y(hist[i].usedMB + hist[i].compMB), 'rgba(167, 139, 250, 0.20)')
+    line(ctx, hist, x, i => y(total - hist[i].freeMB), 'rgba(251, 113, 133, 0.62)')
+    ctx.fillStyle = '#8e96a8'; ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace'
+    ctx.fillText(gb(total) + ' total · cyan=used violet=+comp red=pressure', 4, 10)
   }
 
   const [ctx2, w2, h2] = setupCanvas($('swapchart'))
@@ -726,13 +777,13 @@ function renderSystem() {
   if (hist.length > 1) {
     const max = Math.max(10, ...hist.map(s => s.soRate))
     const bw = w2 / hist.length
-    ctx2.fillStyle = '#fb923c99'
+    ctx2.fillStyle = 'rgba(245, 158, 11, 0.55)'
     hist.forEach((s, i) => {
       if (!s.soRate) return
       const bh = (s.soRate / max) * (h2 - 10)
       ctx2.fillRect(i * bw, h2 - bh, Math.max(1, bw - .5), bh)
     })
-    ctx2.fillStyle = '#454f68'; ctx2.font = '9px monospace'
+    ctx2.fillStyle = '#8e96a8'; ctx2.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace'
     ctx2.fillText(`swapouts/s (peak ${max | 0})`, 4, 9)
   }
 }
@@ -812,8 +863,8 @@ function ensureTerm(id, profile) {
   $('terms').appendChild(mount)
   const term = new Terminal({
     fontSize: 12,
-    fontFamily: 'SF Mono, Menlo, monospace',
-    theme: { background: '#0b0e14', foreground: '#c8d0e0', cursor: '#5ac8fa' },
+    fontFamily: 'SF Mono, ui-monospace, Menlo, Monaco, Consolas, monospace',
+    theme: { background: '#08090d', foreground: '#d4dae4', cursor: '#72d4ff', selectionBackground: '#72d4ff33' },
     scrollback: 4000,
   })
   const fit = new FitAddon.FitAddon()
@@ -876,8 +927,9 @@ function renderTabs() {
     }
 }
 
-for (const b of document.querySelectorAll('#term-actions button'))
-  b.onclick = () => {
+$('term-actions').addEventListener('click', e => {
+  const b = e.target.closest('button[data-profile]')
+  if (b) {
     $('drawer').classList.remove('collapsed')
     send({
       type: 'pty.create',
@@ -888,6 +940,7 @@ for (const b of document.querySelectorAll('#term-actions button'))
       rows: 30,
     })
   }
+})
 
 /* drawer resize + toggle */
 {
@@ -999,6 +1052,30 @@ function renderComposio() {
       rows.push(row(st.toLowerCase(), [...new Set(byStatus[st])].map(esc).join(', ')))
     }
   }
+  box.innerHTML = rows.join('')
+}
+
+/* ── shared agent memory control ───────────────────────── */
+function renderMemory() {
+  const m = S.memory
+  const head = $('memory-summary')
+  const box = $('memory-card')
+  if (!head || !box) return
+  if (!m) { head.textContent = ''; box.innerHTML = '<div class="empty-sm">—</div>'; return }
+
+  const counts = m.ledger?.counts || { pending: 0, promoted: 0, archived: 0, total: 0 }
+  head.innerHTML = m.ok
+    ? `<b>${counts.pending}</b> pending · ${counts.promoted} promoted`
+    : `<span class="warn">${esc((m.health || []).join(', ') || 'check')}</span>`
+
+  const rows = []
+  rows.push(row('policy', esc(m.policy || 'review-first')))
+  rows.push(row('source', `${m.source?.localOnly ? 'loopback' : 'CHECK'} ${esc(m.source?.url || '—')}`))
+  rows.push(row('allowlist', esc((m.projects || []).join(', ') || '—')))
+  rows.push(row('ledger', `${counts.total} total · cursor ${esc(m.ledger?.cursorHighestId ?? 0)}`))
+  rows.push(row('inbox', `${m.inbox?.observationMarkers ?? 0} markers · ${m.inbox?.exists ? 'present' : 'missing'}`))
+  rows.push(row('status note', m.statusNote?.exists ? `updated ${esc(m.statusNote.updatedAt || '—')}` : '<span class="warn">missing</span>'))
+  if (m.health?.length) rows.push(row('health', `<span class="warn">${esc(m.health.join(', '))}</span>`))
   box.innerHTML = rows.join('')
 }
 
@@ -1459,10 +1536,11 @@ function renderArchive() {
 }
 
 function renderAll() {
+  renderRuntimes()
   setView(S.view)
   renderTopbar(); renderSessions(); renderSystem(); renderServices(); renderProcs(); renderFeed()
   renderOffice(); renderRoomDetail(); renderDeck()
-  renderBoard(); renderComposio(); renderAgents(); renderAvatars()
+  renderBoard(); renderComposio(); renderMemory(); renderAgents(); renderAvatars()
   renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderArchive()
   renderEdition()
 }

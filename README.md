@@ -22,25 +22,57 @@ single answer, because it looks like corroboration.
 
 Quorum is built so agreement has to be **earned**.
 
-## Run
+## Quick start
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/Beauwilliams32/quorum/main/scripts/install.sh | bash
+```
+
+Clones to `~/.quorum/app`, installs, verifies, and tells you how to start. Then:
+
+```sh
+cd ~/.quorum/app && npm start        # → http://127.0.0.1:4747
+```
+
+A seven-step guided tour runs on first launch (`?` in the top bar replays it),
+and your projects are discovered automatically — there is nothing to configure
+before it works.
+
+<details>
+<summary>Prefer to clone it yourself</summary>
+
+```sh
+git clone https://github.com/Beauwilliams32/quorum.git
+cd quorum
 npm install
 npm start          # → http://127.0.0.1:4747
-npm run check
-npm test
+npm run check      # syntax sweep
+npm test           # full suite
 ```
+</details>
+
+**Requirements:** Node 20+, git, and the
+[Claude Code CLI](https://claude.com/claude-code) signed in — debate turns run
+as headless `claude -p` processes on your own account. The cockpit runs without
+it; the roundtable doesn't.
+
+### Let a model set it up for you
+
+```sh
+npm run bootstrap              # propose a setup, print it, write nothing
+npm run bootstrap -- --apply   # write it, then re-run the test suite
+```
+
+Reads which directories your AI sessions actually run in, which agent CLIs are
+installed, and your workspace's own `CLAUDE.md`, then proposes labelled rooms
+and runtimes. **Transcripts are never sent** — only derived signal (paths,
+counts, headings). The proposal is validated before it is shown, your existing
+config is backed up before it is replaced, and `--apply` verifies the build
+afterwards.
 
 `PORT=5000 npm start` to change the port. `GET /health` returns a secret-free
 readiness payload. Binds **127.0.0.1 only** — it can spawn terminals, so it must
 never be exposed beyond loopback.
-
-Requires the [Claude Code CLI](https://claude.com/claude-code) installed and
-authenticated: debate turns run as headless `claude -p` processes on your own
-account.
-
-First launch starts a **seven-step guided tour** (replay it anytime with the
-`?` button in the top bar).
 
 ## Projects are discovered, not configured
 
@@ -56,12 +88,26 @@ To take control, create `~/.quorum/config.json`:
 {
   "roots": ["~/code", "~/work"],
   "projects": [{ "id": "api", "label": "Billing API", "path": "~/code/api" }],
-  "hidden": ["some-discovered-id"]
+  "hidden": ["some-discovered-id"],
+  "runtimes": [{ "id": "gemini", "label": "gemini", "command": "gemini" }],
+  "models": ["claude-opus-4-1"]
 }
 ```
 
 Explicit `projects` win over discovery; `hidden` suppresses rooms you don't
 want. The file is re-read every 30 seconds — edits apply without a restart.
+
+## Bring your own agents and models
+
+`runtimes` adds any agent CLI on your PATH — gemini, aider, goose, opencode, an
+internal wrapper — as a one-keystroke launch button everywhere terminals can be
+spawned. `models` adds any model name the `claude` CLI accepts to the
+roundtable's model picker, full model ids included.
+
+Both are validated before they load. A runtime `command` must be a bare program
+name or absolute path: **no arguments, no shell metacharacters**. That line is
+what keeps a config file from becoming a way to run arbitrary shell, and it is
+covered by tests in `test/validate.test.mjs`.
 
 ## The roundtable
 
@@ -115,11 +161,11 @@ specialists as JSON in `~/.quorum/cast/`. Drop the licence file at
 
 | View | What |
 |---|---|
-| **Studio** (default) | The crew and your project rooms, drawn as stages. Live sessions stand in the room matching their cwd. Drag a character or a runtime onto a room to steer it there. |
-| **Roundtable** | Convene a debate, watch it happen, export the record. |
-| **Deck** | Interactive CSS-3D command room: project nodes, agent nodes, live system pressure, sessions, transcript handoff, and real PTY seating. |
-| **Board** | Global task board across sessions + Composio connection health. |
-| **Radar** | Sessions list, live transcript, system/Comfy/Hermes panels. |
+| **Studio / Office** (default) | The crew, runtime launchers, team desks, and project rooms. Live sessions stand in the room matching their cwd; drag a character or runtime onto a room to steer it there. |
+| **Roundtable** | Convene a debate, watch it happen, and export the decision record. |
+| **Deck** | Interactive CSS-3D command room: project nodes, agent nodes, live system pressure, sessions, transcript handoff, real PTY seating, and shared memory pending count. |
+| **Board** | Global task board plus Composio, live agents, and the Agent Memory Control Plane status card. |
+| **Radar** | Classic sessions list + live transcript + system/Comfy/Hermes panels. |
 
 Add `?view=office|table|deck|board|radar` to link a view directly.
 
@@ -127,14 +173,15 @@ Add `?view=office|table|deck|board|radar` to link a view directly.
 
 | Pane | Source | Cadence |
 |---|---|---|
-| Studio rooms | Session `cwd` → project catalog + process groups | 2s |
-| Sessions | `~/.claude/projects/**/*.jsonl` + `~/.codex/sessions/**`, touched in 48h | 3s |
-| Live transcript | Click a session → tails in realtime | 1s |
-| System | `vm_stat` + swap — free/compressed/swap charts | 2s |
-| Render engine | ComfyUI `:8188` (+ HF download detection) | 5s |
-| Hermes | Gateway `:8644/health` + process count | 5s |
-| Agent auth | Read-only freshness (never writes, never shows tokens) | 5s |
-| Top memory / Events | `ps` diffing — spawn/exit feed | 2.5s |
+| Studio / Office rooms | Session `cwd` → project catalog + process groups | 2s |
+| Sessions (Radar) | `~/.claude/projects/**/*.jsonl` + `~/.codex/sessions/**` — sessions touched in 48h, with live "what is it doing" summaries. BG badge = background job. | 3s |
+| Live transcript (center) | Click a session → its transcript tails in realtime. | 1s |
+| System | `vm_stat` + swap — free/compressed/swap charts. | 2s |
+| Render engine | ComfyUI `:8188` (+ HF download detection). | 5s |
+| Hermes | Gateway `:8644/health` + process count. | 5s |
+| Agent auth | Read-only freshness for Codex auth (never writes, never shows tokens). | 5s |
+| Memory control | `~/CLAUDE/agent-memory-bridge/config.json`, ledger, Obsidian inbox, and generated control-plane note. Shows allowlist, pending/promoted/archive counts, and drift. | 10s |
+| Top memory / Events | `ps` diffing — spawn/exit feed for classified AI processes. | 2.5s |
 
 Presence stamps land in `~/.quorum/presence.json` (no secrets). Data written by
 the pre-rename versions in `~/.unified-ai-operator/` is still read, so nothing
@@ -163,6 +210,16 @@ Unload with `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tridentso
 > fight over port 4747:
 > `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tridentsocial.unified-ai-operator.plist`
 
+## UI principles
+
+This is a **Command / Inspect + Monitor** surface, not a marketing page.
+
+- Dark-native cockpit: near-black canvas, low-glare panels, thin structural borders.
+- Sans-first hierarchy: labels, rooms, cards, and controls use the UI sans stack; monospace is reserved for terminal output, ids, paths, timestamps, and metrics.
+- One primary accent: Trident cyan marks selection and command affordance only. Status colors stay semantic: green = available/healthy, yellow = watch, red = down/error, purple = agent/Codex-class context.
+- Data density wins: cards and lists stay compact, but every title/metadata/status tier has distinct contrast.
+- Motion is functional only and respects `prefers-reduced-motion`.
+
 ## Architecture
 
 ```
@@ -177,9 +234,10 @@ src/roundtable.js       debate protocol, turn execution, cost, cancellation
 src/decision-record.js  finished debate → exportable markdown ADR
 src/paths.js            data dir, with the pre-rename home still readable
 src/config.js           ~/.quorum/config.json + project auto-discovery
+src/validate.js         validates generated config/persona/runtime files
 public/art.js           character + room SVG art — one silhouette, six identities
 public/                 single-page UI (no build step)
-src/collectors/         processes · sessions · services · system · projects · tasks
+src/collectors/         processes · sessions · services · system · projects · tasks · composio · agents · memory
 archive/phase0-coordinator/   quarantined Rust/Tauri Phase-0 (not the product)
 ```
 

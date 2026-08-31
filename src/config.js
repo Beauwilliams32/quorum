@@ -28,6 +28,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { findFile, DATA_DIR } from './paths.js'
+import { validateRuntime } from './validate.js'
 
 const HOME = os.homedir()
 
@@ -37,7 +38,7 @@ const expand = p => path.resolve(String(p).replace(/^~(?=\/|$)/, HOME))
 
 export function loadConfig() {
   const file = findFile('config.json')
-  if (!file) return { roots: null, projects: [], hidden: [], path: CONFIG_PATH, exists: false }
+  if (!file) return { roots: null, projects: [], hidden: [], runtimes: [], models: [], path: CONFIG_PATH, exists: false }
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
     return {
@@ -50,14 +51,54 @@ export function loadConfig() {
           pathPrefix: expand(p.path),
         })),
       hidden: (Array.isArray(raw.hidden) ? raw.hidden : []).map(String),
+      // Extra agent CLIs (gemini, aider, goose, …) — validated because the
+      // command string ends up executed; a bad entry is dropped, not fatal.
+      runtimes: (Array.isArray(raw.runtimes) ? raw.runtimes : [])
+        .map(r => validateRuntime(r))
+        .filter(v => v.ok)
+        .map(v => v.value)
+        .slice(0, 12),
+      // Extra roundtable models beyond sonnet/opus/haiku — any name the
+      // `claude` CLI accepts (full model ids included).
+      models: (Array.isArray(raw.models) ? raw.models : [])
+        .filter(m => typeof m === 'string' && m.trim())
+        .map(m => m.trim().slice(0, 80))
+        .slice(0, 20),
       path: file,
       exists: true,
     }
   } catch {
     // A malformed config must not blank the floor — fall back to discovery and
     // surface the problem through configInfo() rather than dying silently.
-    return { roots: null, projects: [], hidden: [], path: file, exists: true, malformed: true }
+    return { roots: null, projects: [], hidden: [], runtimes: [], models: [], path: file, exists: true, malformed: true }
   }
+}
+
+/**
+ * The launchable runtime set: built-ins plus the config's own agents. Built-in
+ * ids can't be overridden — a config that silently rebound `claude` to another
+ * binary would be indistinguishable from the real thing in the UI.
+ */
+export const BUILTIN_RUNTIMES = [
+  { id: 'claude', label: 'claude', command: 'claude', builtin: true },
+  { id: 'codex', label: 'codex', command: 'codex', builtin: true },
+  { id: 'hermes', label: 'hermes', command: 'hermes', builtin: true },
+  { id: 'shell', label: 'zsh', command: null, builtin: true },
+]
+
+export function loadRuntimes() {
+  const cfg = loadConfig()
+  const taken = new Set(BUILTIN_RUNTIMES.map(r => r.id))
+  const extra = (cfg.runtimes || []).filter(r => !taken.has(r.id))
+  return [...BUILTIN_RUNTIMES, ...extra]
+}
+
+/** Roundtable model choices: the standard trio plus anything from config. */
+export const BUILTIN_MODELS = ['sonnet', 'opus', 'haiku']
+
+export function loadModels() {
+  const cfg = loadConfig()
+  return [...new Set([...BUILTIN_MODELS, ...(cfg.models || [])])]
 }
 
 /**
