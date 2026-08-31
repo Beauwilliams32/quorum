@@ -28,7 +28,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { findFile, DATA_DIR } from './paths.js'
-import { validateRuntime } from './validate.js'
+import { normalizeOllamaHost, validateAgentPack, validateRuntime } from './validate.js'
 
 const HOME = os.homedir()
 
@@ -38,7 +38,7 @@ const expand = p => path.resolve(String(p).replace(/^~(?=\/|$)/, HOME))
 
 export function loadConfig() {
   const file = findFile('config.json')
-  if (!file) return { roots: null, projects: [], hidden: [], runtimes: [], models: [], path: CONFIG_PATH, exists: false }
+  if (!file) return { roots: null, projects: [], hidden: [], runtimes: [], models: [], agentPacks: [], ollamaHost: null, path: CONFIG_PATH, exists: false }
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
     return {
@@ -64,7 +64,13 @@ export function loadConfig() {
         .filter(m => typeof m === 'string' && m.trim())
         .map(m => m.trim().slice(0, 80))
         .slice(0, 20),
-      modelMappings: raw.modelMappings && typeof raw.modelMappings === 'object' && !Array.isArray(raw.modelMappings) ? Object.fromEntries(Object.entries(raw.modelMappings).filter(([k, v]) => /^[a-z0-9-]{1,40}$/.test(k) && typeof v === 'string').slice(0, 40)) : {},
+      agentPacks: (Array.isArray(raw.agentPacks) ? raw.agentPacks : [])
+        .map(pack => validateAgentPack(pack))
+        .filter(result => result.ok)
+        .map(result => result.value)
+        .slice(0, 12),
+      ollamaHost: normalizeOllamaHost(raw.ollamaHost),
+      modelMappings: raw.modelMappings && typeof raw.modelMappings === 'object' && !Array.isArray(raw.modelMappings) ? Object.fromEntries(Object.entries(raw.modelMappings).filter(([k, v]) => /^[a-z0-9-]{1,40}$/.test(k) && typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,119}$/.test(v.trim())).slice(0, 40)) : {},
       pets: raw.pets && typeof raw.pets === 'object' && !Array.isArray(raw.pets) ? Object.fromEntries(Object.entries(raw.pets).filter(([k, v]) => /^[a-z0-9-]{1,40}$/.test(k) && typeof v === 'string').slice(0, 40)) : {},
       display: raw.display && typeof raw.display === 'object' ? { theme: raw.display.theme === 'light' ? 'light' : 'dark', refreshSeconds: Math.max(2, Math.min(120, Number(raw.display.refreshSeconds) || 5)) } : { theme: 'dark', refreshSeconds: 5 },
       path: file,
@@ -73,7 +79,7 @@ export function loadConfig() {
   } catch {
     // A malformed config must not blank the floor — fall back to discovery and
     // surface the problem through configInfo() rather than dying silently.
-    return { roots: null, projects: [], hidden: [], runtimes: [], models: [], path: file, exists: true, malformed: true }
+    return { roots: null, projects: [], hidden: [], runtimes: [], models: [], agentPacks: [], ollamaHost: null, path: file, exists: true, malformed: true }
   }
 }
 
@@ -83,9 +89,13 @@ export function loadConfig() {
  * binary would be indistinguishable from the real thing in the UI.
  */
 export const BUILTIN_RUNTIMES = [
-  { id: 'claude', label: 'claude', command: 'claude', builtin: true },
-  { id: 'codex', label: 'codex', command: 'codex', builtin: true },
-  { id: 'hermes', label: 'hermes', command: 'hermes', builtin: true },
+  { id: 'claude', label: 'claude', command: 'claude', provider: 'claude', kind: 'cloud', promptMode: 'arg', promptFlag: '-p', modelFlag: '--model', workdirFlag: '--cwd', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
+  { id: 'codex', label: 'codex', command: 'codex', provider: 'codex', kind: 'cloud', promptMode: 'arg', promptFlag: null, modelFlag: '--model', workdirFlag: '--cd', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
+  { id: 'copilot', label: 'copilot', command: 'copilot', provider: 'copilot', kind: 'cloud', promptMode: 'arg', promptFlag: '-p', modelFlag: '--model', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
+  { id: 'gemini', label: 'gemini', command: 'gemini', provider: 'gemini', kind: 'cloud', promptMode: 'arg', promptFlag: '-p', modelFlag: '--model', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
+  { id: 'hermes', label: 'hermes', command: 'hermes', provider: 'hermes', kind: 'local', promptMode: 'arg', promptFlag: '--query', modelFlag: '--model', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
+  { id: 'openclaw', label: 'openclaw', command: 'openclaw', provider: 'openclaw', kind: 'local', promptMode: 'interactive', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
+  { id: 'ollama', label: 'ollama', command: 'ollama', provider: 'ollama', kind: 'local', promptMode: 'arg', modelDiscovery: 'ollama', roundtable: true, capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
   { id: 'shell', label: 'zsh', command: null, builtin: true },
 ]
 
@@ -94,6 +104,11 @@ export function loadRuntimes() {
   const taken = new Set(BUILTIN_RUNTIMES.map(r => r.id))
   const extra = (cfg.runtimes || []).filter(r => !taken.has(r.id))
   return [...BUILTIN_RUNTIMES, ...extra]
+}
+
+export function loadAgentPacks() {
+  const cfg = loadConfig()
+  return cfg.agentPacks || []
 }
 
 /** Roundtable model choices: the standard trio plus anything from config. */

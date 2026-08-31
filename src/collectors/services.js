@@ -18,6 +18,46 @@ export function commandAvailable(command, envPath = process.env.PATH || '') {
   })
 }
 
+function executable(file) {
+  try {
+    const stat = fs.statSync(file)
+    return stat.isFile() && (stat.mode & 0o111) !== 0
+  } catch { return false }
+}
+
+/**
+ * Resolve Claude Code the same way for readiness and roundtable child turns.
+ * LaunchAgents do not inherit an interactive shell's PATH, and Claude Code
+ * can be installed as the executable shipped with the local Agent SDK rather
+ * than as a global `claude` command. The returned value is a path only; no
+ * credential or command output is persisted.
+ */
+export function resolveClaudeCommand(envPath = process.env.PATH || '', home = HOME, env = process.env) {
+  const configured = typeof env.QUORUM_CLAUDE_COMMAND === 'string' ? env.QUORUM_CLAUDE_COMMAND.trim() : ''
+  if (configured && executable(configured)) return configured
+  for (const dir of String(envPath).split(path.delimiter)) {
+    const candidate = dir ? path.join(dir, 'claude') : ''
+    if (candidate && executable(candidate)) return candidate
+  }
+
+  // Claude Code's standalone SDK binary is a valid headless CLI and is
+  // present in local-first installs where the global npm shim is absent.
+  const projectRoots = [
+    path.join(home, 'CLAUDE', 'claude-mem'),
+    path.join(home, 'claude-mem'),
+  ]
+  for (const root of projectRoots) {
+    const vendorRoot = path.join(root, 'node_modules', '@anthropic-ai')
+    let entries = []
+    try { entries = fs.readdirSync(vendorRoot) } catch { continue }
+    for (const entry of entries.filter(name => name.startsWith('claude-agent-sdk-')).sort().reverse()) {
+      const candidate = path.join(vendorRoot, entry, 'claude')
+      if (executable(candidate)) return candidate
+    }
+  }
+  return null
+}
+
 async function getJson(url) {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(1800) })
@@ -96,7 +136,7 @@ export function readAuth(env = process.env) {
     const a = JSON.parse(fs.readFileSync(path.join(HOME, '.codex', 'auth.json'), 'utf8'))
     out.codex = { configured: true, cli: commandAvailable('codex'), mode: a.auth_mode || 'unknown', lastRefresh: a.last_refresh || null }
   } catch { out.codex = { configured: false, cli: commandAvailable('codex') } }
-  out.claude = { configured: claudeConfigured, cli: commandAvailable('claude') }
+  out.claude = { configured: claudeConfigured, cli: !!resolveClaudeCommand(env.PATH, HOME, env) }
   out.hermes = { configured: hermesConfigured, cli: commandAvailable('hermes') }
   out.anthropic = { apiKeyAvailable: apiKeyAvailable(env) }
   return out

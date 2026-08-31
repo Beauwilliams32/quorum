@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseTurn, Roundtable, RoundtableRegistry } from '../src/roundtable.js'
+import { parseTurn, Roundtable, RoundtableRegistry, resolveModelRef, turnArgs } from '../src/roundtable.js'
 import { cast, debaters, registerCast, MODERATOR_ID, castMember, publicCast } from '../src/cast.js'
 import { LOCKED_CAST } from '../src/cast-locked.js'
 
@@ -81,6 +81,25 @@ test('an unknown model falls back to sonnet rather than being passed through', (
   const s = fakeState()
   assert.equal(new Roundtable(s, { topic: 'x', participants: ['vex', 'bolt'], model: 'gpt-9' }).model, 'sonnet')
   assert.equal(new Roundtable(s, { topic: 'x', participants: ['vex', 'bolt'], model: 'opus' }).model, 'opus')
+})
+
+test('local provider model references build bounded Ollama invocations', () => {
+  const selection = resolveModelRef('ollama:gemma3:latest')
+  assert.equal(selection.provider, 'ollama')
+  assert.equal(selection.model, 'gemma3:latest')
+  assert.equal(selection.ref, 'ollama:gemma3:latest')
+  const rt = new Roundtable(fakeState(), { topic: 'x', participants: ['vex', 'bolt'], model: 'ollama:gemma3:latest' })
+  assert.equal(rt.snapshot().provider, 'ollama')
+  assert.equal(rt.snapshot().authMode, 'local')
+  assert.deepEqual(rt.buildInvocation('answer in JSON', 'a local specialist').args, ['run', 'gemma3:latest'])
+  assert.match(rt.buildInvocation('answer in JSON', 'a local specialist').input, /a local specialist/)
+})
+
+test('API-key roundtables use the safe bare CLI switch without storing a key', () => {
+  const rt = new Roundtable(fakeState(), { topic: 'x', participants: ['vex', 'bolt'], authMode: 'api-key' })
+  assert.equal(rt.snapshot().authMode, 'api-key')
+  assert.ok(turnArgs('p', 'persona', 'sonnet', ['--bare']).includes('--bare'))
+  assert.equal(JSON.stringify(rt.snapshot()).includes('ANTHROPIC_API_KEY'), false)
 })
 
 test('the topic is truncated rather than sent unbounded to the model', () => {

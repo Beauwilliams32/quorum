@@ -25,26 +25,33 @@ const S = {
   cast: [],
   castById: new Map(),
   edition: { tier: 'free', reason: '' },
-  // Launchable agent CLIs and debate models, both sent by the server from
-  // config. Seeded with the built-ins so the buttons are never empty during
-  // the gap between page load and the first websocket frame.
+  // Launchable agent CLIs, sent by the server from config. Seeded with the
+  // built-ins so the buttons are never empty between load and the first frame.
   runtimes: [
     { id: 'claude', label: 'claude', builtin: true },
     { id: 'codex', label: 'codex', builtin: true },
     { id: 'hermes', label: 'hermes', builtin: true },
     { id: 'shell', label: 'zsh', builtin: true },
   ],
-  models: ['sonnet', 'opus', 'haiku'],
   estCostPerTurn: 0.08,
+  modelOptions: [],
   // Which characters are seated at the table being configured. Persisted so a
   // reload does not silently re-seat a different, more expensive lineup.
   seated: new Set(JSON.parse(localStorage.getItem('quorum-seated') || '["vex","bolt","sable"]')),
   debate: null,          // the live (or last-viewed) debate snapshot
   speaking: null,        // { speaker, phase } while a turn is in flight
   archive: [],
-  catalog: null,
+  catalog: null, agentControl: null,
   commandPreview: null,
 }
+
+const DEFAULT_MODEL_OPTIONS = [
+  { id: 'claude:sonnet', label: 'Claude · sonnet — balanced', provider: 'claude', model: 'sonnet', estimatedCostUsd: 0.08, available: true },
+  { id: 'claude:opus', label: 'Claude · opus — deepest, priciest', provider: 'claude', model: 'opus', estimatedCostUsd: 0.4, available: true },
+  { id: 'claude:haiku', label: 'Claude · haiku — fastest, cheapest', provider: 'claude', model: 'haiku', estimatedCostUsd: 0.024, available: true },
+  { id: 'ollama:gemma3:latest', label: 'Ollama · gemma3:latest — local', provider: 'ollama', model: 'gemma3:latest', local: true, available: false },
+]
+const currentModelOptions = () => S.modelOptions.length ? S.modelOptions : DEFAULT_MODEL_OPTIONS
 
 const $ = id => document.getElementById(id)
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -81,6 +88,7 @@ const handlers = {
     S.composio = m.data.composio || null
     S.agents = m.data.agents || null
     S.memory = m.data.memory || null
+    S.agentControl = m.data.agentControl || null
     S.system = m.data.system?.latest || null
     S.hist = m.data.system?.hist ? [...m.data.system.hist] : []
     S.feed = m.feed || []
@@ -102,6 +110,7 @@ const handlers = {
       if (m.key === 'composio') renderComposio()
       if (m.key === 'agents') { renderAgents(); renderAvatars(); renderDeck() }
       if (m.key === 'memory') { renderMemory(); renderTopbar(); renderDeck() }
+      if (m.key === 'agentControl') renderAgentControl()
     }
   },
   event(m) {
@@ -117,6 +126,8 @@ const handlers = {
   },
   error(m) {
     console.warn('[server]', m.error)
+    const estimate = $('rt-estimate')
+    if (estimate && m.error) { estimate.className = 'rt-estimate warn'; estimate.textContent = m.error }
     // Errors only ever answer a message this client just sent, so a chat.open
     // that threw server-side must not leave the composer disabled forever.
     if (S.chatPending) clearChatPending()
@@ -140,8 +151,8 @@ const handlers = {
     S.castById = new Map(S.cast.map(c => [c.id, c]))
     S.edition = m.edition || { tier: 'free', reason: '' }
     S.catalog = m.catalog || S.catalog
+    S.modelOptions = Array.isArray(m.modelOptions) ? m.modelOptions : S.modelOptions
     if (Array.isArray(m.runtimes) && m.runtimes.length) S.runtimes = m.runtimes
-    if (Array.isArray(m.models) && m.models.length) S.models = m.models
     if (m.estCostPerTurnUsd) S.estCostPerTurn = m.estCostPerTurnUsd
     // A stored lineup from a previous Pro session must not survive a licence
     // lapsing, or "convene" fails server-side with no visible cause.
@@ -261,6 +272,7 @@ function renderCommand() {
   $('command-connection').textContent = `${available}/${catalog.runtimes.length} runtimes ready · ${catalog.config.projectCount} project roots · no secrets exposed`
   const rooms = S.projects?.rooms || []
   $('command-pulse').innerHTML = `<div class="command-stat"><b>${rooms.length}</b><span>project rooms</span></div><div class="command-stat"><b>${(S.sessions?.cards || []).filter(s => s.active).length}</b><span>active sessions</span></div><div class="command-stat"><b>${catalog.models.length}</b><span>catalog models</span></div><div class="command-stat"><b>${S.feed.length}</b><span>audit events</span></div>`
+  renderAgentWorkbench(catalog, rooms)
   box.innerHTML = catalog.runtimes.map(runtime => `<article class="command-card ${runtime.available ? 'ready' : 'offline'}"><div class="pet-mini ${esc(runtime.id)}">✦</div><div class="command-card-copy"><h3>${esc(runtime.label)} <span>${runtime.available ? 'ready' : 'offline'}</span></h3><p>${esc(runtime.kind)} · ${esc(runtime.capabilities.join(' · '))}</p><small>${runtime.authReady ? 'auth available via local environment' : 'auth not reported / optional'}</small></div><button type="button" data-command-launch="${esc(runtime.id)}" ${runtime.available && runtime.command && rooms.length ? '' : 'disabled'}>preview launch</button></article>`).join('')
   for (const button of box.querySelectorAll('[data-command-launch]')) button.onclick = () => {
     const roomId = S.selectedRoom || rooms[0]?.id
@@ -272,6 +284,75 @@ function renderCommand() {
     $('command-cancel').onclick = () => { $('command-actions').innerHTML = ''; $('command-preview').textContent = 'action cancelled' }
   }
   if (S.commandPreview) { $('command-preview').textContent = S.commandPreview.summary; $('command-actions').innerHTML = `<button type="button" id="command-confirm">confirm action</button>`; $('command-confirm').onclick = () => send({ type: 'command.execute', ...S.commandPreview, confirm: true }) }
+}
+
+function renderAgentWorkbench(catalog, rooms) {
+  const form = $('agent-form')
+  if (!form) return
+  const packs = catalog.agentPacks || []
+  const packSelect = $('agent-pack')
+  const runtimeSelect = $('agent-runtime')
+  const modelSelect = $('agent-model')
+  if (!packs.length) { form.innerHTML = '<div class="empty">agent packs unavailable</div>'; return }
+  const previousPack = packSelect.value
+  packSelect.innerHTML = packs.map(pack => `<option value="${esc(pack.id)}">${esc(pack.label)} · ${esc(pack.role)}</option>`).join('')
+  packSelect.value = packs.some(pack => pack.id === previousPack) ? previousPack : packs[0].id
+  const pack = packs.find(item => item.id === packSelect.value) || packs[0]
+  const candidates = catalog.runtimes.filter(runtime => pack.runtimes?.includes(runtime.id) && runtime.command && runtime.id !== 'shell')
+  const ready = candidates.filter(runtime => runtime.available)
+  const runtimeChoices = ready.length ? ready : candidates
+  const oldRuntime = runtimeSelect.value
+  runtimeSelect.innerHTML = runtimeChoices.map(runtime => `<option value="${esc(runtime.id)}">${esc(runtime.label)}${runtime.available ? '' : ' · offline'}</option>`).join('')
+  runtimeSelect.value = runtimeChoices.some(runtime => runtime.id === oldRuntime) ? oldRuntime : runtimeChoices[0]?.id || ''
+  const runtimeId = runtimeSelect.value
+  const options = (pack.models || []).filter(model => model.provider === runtimeId)
+  if (!options.length) options.push({ id: `${runtimeId}:auto`, label: `${runtimeId} · runtime default`, provider: runtimeId, model: 'auto', available: true })
+  const oldModel = modelSelect.value
+  modelSelect.innerHTML = options.map(model => `<option value="${esc(model.id)}">${esc(model.label)}</option>`).join('')
+  modelSelect.value = options.some(model => model.id === oldModel) ? oldModel : options[0].id
+  $('agent-brief').innerHTML = `<strong>${esc(pack.summary)}</strong><span>${esc(pack.gates.join(' · '))}</span><small>role ${esc(pack.role)} · pack contract ${pack.promptAvailable ? 'loaded' : 'missing'}</small>`
+  packSelect.onchange = () => renderCommand()
+  runtimeSelect.onchange = () => renderCommand()
+  form.onsubmit = event => {
+    event.preventDefault()
+    const roomId = S.selectedRoom || rooms[0]?.id
+    const task = $('agent-task').value.trim()
+    if (!roomId || !runtimeId || !task) { $('agent-brief').classList.add('warn'); $('agent-brief').insertAdjacentHTML('beforeend', '<span>Choose a room and write a bounded task brief.</span>'); return }
+    send({ type: 'command.preview', action: 'launch', packId: pack.id, runtimeId, modelRef: modelSelect.value, roomId, task })
+    $('command-preview').textContent = `preparing ${pack.label} → ${runtimeId} · ${roomId}`
+    $('command-actions').innerHTML = '<button type="button" id="command-cancel" class="danger">cancel</button>'
+    $('command-cancel').onclick = () => { S.commandPreview = null; $('command-actions').innerHTML = ''; $('command-preview').textContent = 'action cancelled' }
+  }
+}
+
+async function controlPost(path, body = {}) {
+  try {
+    const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+    return data
+  } catch (error) { console.warn('[agent-control]', error.message); return null }
+}
+
+function renderAgentControl() {
+  const box = $('agent-control-card')
+  if (!box) return
+  const control = S.agentControl
+  if (!control) { box.innerHTML = '<div class="empty-sm">control plane warming up…</div>'; return }
+  const runs = (control.runs || []).slice(0, 8)
+  const pending = (control.actions || []).filter(action => action.status === 'pending-approval')
+  const lease = control.policy?.lease?.ttlSeconds ? `${Math.round(control.policy.lease.ttlSeconds / 60)}m lease` : 'lease active'
+  box.innerHTML = `<div class="control-summary"><span><b>${runs.filter(run => run.status === 'active').length}</b> active</span><span><b>${pending.length}</b> pending</span><span>${esc(lease)}</span></div>` +
+    (runs.length ? runs.map(run => `<div class="control-run"><span class="dot ${run.status === 'active' ? 'up' : ''}"></span><span class="control-run-copy"><b>${esc(run.packId || run.runtime)} · ${esc(run.role)}</b><small>${esc(run.phase || run.status)} · ${esc(run.worktree)}</small></span><span class="control-run-actions"><small>${run.leaseExpiresAt ? rel(run.leaseExpiresAt) + ' lease' : 'closed'}</small>${run.status === 'active' ? `<button type="button" data-control-run-cancel="${esc(run.runId)}">stop</button>` : ''}${run.status === 'stale' ? `<button type="button" data-control-run-recover="${esc(run.runId)}">recover</button>` : ''}</span></div>`).join('') : '<div class="empty-sm">no claimed runs</div>') +
+    (pending.length ? `<div class="control-pending"><b>EXTERNAL APPROVALS</b>${pending.map(action => `<div><span>${esc(action.action)} · ${esc(action.id)}</span><button type="button" data-control-approve="${esc(action.id)}">approve</button><button type="button" data-control-cancel="${esc(action.id)}">cancel</button></div>`).join('')}</div>` : '')
+  for (const button of box.querySelectorAll('[data-control-approve],[data-control-cancel]')) button.onclick = async () => {
+    await controlPost(`/api/agent-control/actions/${encodeURIComponent(button.dataset.controlApprove || button.dataset.controlCancel)}/${button.dataset.controlApprove ? 'approve' : 'cancel'}`)
+  }
+  for (const button of box.querySelectorAll('[data-control-run-cancel],[data-control-run-recover]')) button.onclick = async () => {
+    const runId = button.dataset.controlRunCancel || button.dataset.controlRunRecover
+    const suffix = button.dataset.controlRunCancel ? 'cancel' : 'recover'
+    await controlPost(`/api/agent-control/runs/${encodeURIComponent(runId)}/${suffix}`)
+  }
 }
 const comfyDl = () => (S.processes?.procs || []).some(p => p.group === 'comfy' && p.name?.startsWith('hf ⇣'))
 
@@ -714,14 +795,9 @@ function renderRuntimes() {
   const term = $('term-actions')
   if (term) term.innerHTML = btns
 
-  const sel = $('rt-model')
-  if (sel) {
-    const current = sel.value
-    const LABEL = { sonnet: 'sonnet — balanced', opus: 'opus — deepest, priciest', haiku: 'haiku — fastest, cheapest' }
-    sel.innerHTML = S.models.map(m =>
-      `<option value="${esc(m)}">${esc(LABEL[m] || m)}</option>`).join('')
-    if (S.models.includes(current)) sel.value = current
-  }
+  // The model picker is deliberately NOT touched here: renderRoundtable owns
+  // #rt-model through currentModelOptions(), which is provider-aware and drives
+  // the auth-mode row. Two writers to one select is a race, not a feature.
 }
 
 /* ── sessions ──────────────────────────────────────────── */
@@ -1348,9 +1424,31 @@ function renderRoomSelect() {
   else if (S.selectedRoom) sel.value = S.selectedRoom
 }
 
+function renderModelSelect() {
+  const select = $('rt-model')
+  if (!select) return
+  const options = currentModelOptions()
+  const previous = select.value
+  select.innerHTML = options.map(option => {
+    const note = option.local ? ' · on-device' : option.provider === 'claude' ? '' : ` · ${option.provider}`
+    const unavailable = option.available === false ? ' — runtime unavailable' : ''
+    return `<option value="${esc(option.id)}" ${option.available === false ? 'disabled' : ''}>${esc(option.label + note + unavailable)}</option>`
+  }).join('')
+  if ([...select.options].some(option => option.value === previous && !option.disabled)) select.value = previous
+  else if ([...select.options].some(option => !option.disabled)) select.value = [...select.options].find(option => !option.disabled).value
+}
+
 function renderAuthMode() {
   const select = $('rt-auth-mode')
   if (!select) return
+  const selected = currentModelOptions().find(option => option.id === $('rt-model')?.value)
+  if (selected && selected.provider !== 'claude') {
+    select.innerHTML = '<option value="local">local provider — no credentials required</option>'
+    select.value = 'local'
+    select.disabled = true
+    return
+  }
+  select.disabled = false
   const auth = S.services?.auth || {}
   const cliReady = auth.claude?.cli && auth.claude?.configured
   const apiKeyReady = auth.claude?.cli && auth.anthropic?.apiKeyAvailable
@@ -1373,22 +1471,26 @@ function renderEstimate() {
   const box = $('rt-estimate')
   if (!box) return
   const n = S.seated.size
-  const model = $('rt-model')?.value || 'sonnet'
-  const mult = model === 'opus' ? 5 : model === 'haiku' ? 0.3 : 1
+  const model = $('rt-model')?.value || 'claude:sonnet'
+  const option = currentModelOptions().find(item => item.id === model)
+  const estimate = option?.estimatedCostUsd
   const turns = 1 + n * 3 + 1
-  const cost = turns * S.estCostPerTurn * mult
-  const ok = n >= 2 && n <= 5
+  const cost = turns * (estimate ?? 0)
+  const local = option?.local === true
+  const ok = n >= 2 && n <= 5 && option?.available !== false
   box.className = 'rt-estimate' + (ok ? '' : ' warn')
-  box.innerHTML = ok
-    ? `<b>${turns}</b> agent turns · est. <b>~$${cost.toFixed(2)}</b> on ${esc(model)} · runs ${n} specialists in parallel per phase`
-    : `seat between 2 and 5 characters — you have ${n}`
+  if (n < 2 || n > 5) box.textContent = `seat between 2 and 5 characters — you have ${n}`
+  else if (option?.available === false) box.textContent = `${option.label} is unavailable in the Quorum launch environment`
+  else box.innerHTML = local
+    ? `<b>${turns}</b> local agent turns · <b>no API cost</b> on ${esc(option?.model || model)} · runs ${n} specialists in parallel per phase`
+    : `<b>${turns}</b> agent turns · est. <b>~$${cost.toFixed(2)}</b> on ${esc(option?.label || model)} · runs ${n} specialists in parallel per phase`
   const start = $('rt-start')
   if (start) start.disabled = !ok || !!(S.debate && !S.debate.endedAt)
 }
 
 function renderRoundtable() {
   if (S.view !== 'table') { renderMascot(); return }
-  renderRoomSelect(); renderAuthMode(); renderEstimate(); renderMascot()
+  renderRoomSelect(); renderModelSelect(); renderAuthMode(); renderEstimate(); renderMascot()
 
   const d = S.debate
   const live = d && !d.endedAt
@@ -1590,7 +1692,7 @@ function renderArchive() {
       renderRoundtable()
     }
   }
-  $('rt-model')?.addEventListener('change', renderEstimate)
+  $('rt-model')?.addEventListener('change', () => { renderAuthMode(); renderEstimate() })
   const cancel = $('rt-cancel')
   if (cancel) cancel.onclick = () => {
     if (S.debate && confirm('Cancel this roundtable? Turns already spent are not refunded.'))
@@ -1602,7 +1704,7 @@ function renderAll() {
   renderRuntimes()
   setView(S.view)
   renderTopbar(); renderSessions(); renderSystem(); renderServices(); renderProcs(); renderFeed()
-  renderOffice(); renderRoomDetail(); renderDeck(); renderCommand()
+  renderOffice(); renderRoomDetail(); renderDeck(); renderCommand(); renderAgentControl()
   renderBoard(); renderComposio(); renderMemory(); renderAgents(); renderAvatars()
   renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderArchive()
   renderEdition()

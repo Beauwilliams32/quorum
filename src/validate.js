@@ -14,8 +14,29 @@
 
 const HEX = /^#[0-9a-fA-F]{3,8}$/
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/
+const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,119}$/
+const ROLE_CAPABILITIES = {
+  researcher: new Set(['discover', 'read', 'test']),
+  builder: new Set(['discover', 'read', 'test', 'edit', 'git.commit', 'git.push', 'git.merge', 'git.tag']),
+  operator: new Set(['discover', 'read', 'test', 'edit', 'git.commit', 'git.push', 'git.merge', 'git.tag', 'deploy', 'publish', 'provider.change', 'external.send', 'migration.remote']),
+  recovery: new Set(['discover', 'read', 'recovery.inspect', 'recovery.takeover']),
+}
 
 const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : null)
+
+/** Ollama endpoint only: no credentials, paths, queries, or shell syntax. */
+export function normalizeOllamaHost(value) {
+  const raw = str(value, 240)
+  if (!raw) return null
+  try {
+    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`)
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return null
+    if (url.port && (!/^\d+$/.test(url.port) || Number(url.port) < 1 || Number(url.port) > 65535)) return null
+    return url.origin
+  } catch {
+    return null
+  }
+}
 
 /** ~/.quorum/config.json — also the shape the bootstrap is allowed to write. */
 export function validateConfig(raw) {
@@ -63,15 +84,33 @@ export function validateConfig(raw) {
     }
   }
 
+  if (raw.agentPacks !== undefined) {
+    if (!Array.isArray(raw.agentPacks)) errors.push('agentPacks must be an array')
+    else {
+      value.agentPacks = []
+      raw.agentPacks.forEach((pack, i) => {
+        const v = validateAgentPack(pack)
+        if (!v.ok) errors.push(...v.errors.map(e => `agentPacks[${i}]: ${e}`))
+        else value.agentPacks.push(v.value)
+      })
+    }
+  }
+
   if (raw.models !== undefined) {
     if (!Array.isArray(raw.models) || !raw.models.every(m => typeof m === 'string'))
       errors.push('models must be an array of model names')
     else value.models = raw.models.map(m => str(m, 80)).filter(Boolean).slice(0, 20)
   }
 
+  if (raw.ollamaHost !== undefined) {
+    const host = normalizeOllamaHost(raw.ollamaHost)
+    if (!host) errors.push('ollamaHost must be an HTTP(S) host with no credentials or path')
+    else value.ollamaHost = host
+  }
+
   if (raw.modelMappings !== undefined) {
     if (!raw.modelMappings || typeof raw.modelMappings !== 'object' || Array.isArray(raw.modelMappings)) errors.push('modelMappings must be an object')
-    else value.modelMappings = Object.fromEntries(Object.entries(raw.modelMappings).filter(([k, v]) => ID.test(String(k)) && typeof v === 'string' && ID.test(v)).slice(0, 40))
+    else value.modelMappings = Object.fromEntries(Object.entries(raw.modelMappings).filter(([k, v]) => ID.test(String(k)) && typeof v === 'string' && MODEL.test(v.trim())).slice(0, 40))
   }
 
   if (raw.pets !== undefined) {
@@ -103,11 +142,63 @@ export function validateRuntime(r) {
   if (['shell', 'zsh'].includes(id)) errors.push('id conflicts with the built-in shell profile')
   if (!command) errors.push('command is required')
   else if (/[\s;&|<>$`\\'"(){}\[\]*?~#\n]/.test(command)) errors.push('command must be a bare program name or path — no arguments or shell characters')
+  const kind = ['local', 'cloud', 'custom'].includes(r.kind) ? r.kind : 'custom'
+  const promptMode = ['stdin', 'arg', 'file', 'interactive'].includes(r.promptMode) ? r.promptMode : 'stdin'
+  const provider = str(r.provider, 40) || id
+  const modelDiscovery = ['none', 'ollama', 'command'].includes(r.modelDiscovery) ? r.modelDiscovery : 'none'
+  const workdirFlag = r.workdirFlag === undefined ? null : str(r.workdirFlag, 20)
+  const approvalMode = r.approvalMode === undefined ? null : str(r.approvalMode, 40)
+  const capabilities = Array.isArray(r.capabilities) ? [...new Set(r.capabilities.map(v => str(v, 40)).filter(Boolean))].slice(0, 30) : []
+  const modelFlag = r.modelFlag === undefined ? null : str(r.modelFlag, 20)
+  const promptFlag = r.promptFlag === undefined ? null : str(r.promptFlag, 20)
+  if (modelFlag && !/^--?[a-z][a-z0-9-]*$/.test(modelFlag)) errors.push('modelFlag must be a simple CLI flag')
+  if (promptFlag && !/^--?[a-z][a-z0-9-]*$/.test(promptFlag)) errors.push('promptFlag must be a simple CLI flag')
+  if (promptMode === 'arg' && !promptFlag) errors.push('promptFlag is required when promptMode is arg')
+  if (workdirFlag && !/^--?[a-z][a-z0-9-]*$/.test(workdirFlag)) errors.push('workdirFlag must be a simple CLI flag')
+  if (capabilities.some(capability => !['discover', 'read', 'test', 'edit', 'git.commit', 'git.push', 'git.merge', 'git.tag', 'deploy', 'publish', 'provider.change', 'external.send', 'migration.remote', 'recovery.inspect', 'recovery.takeover'].includes(capability))) errors.push('capabilities contain an unknown policy capability')
   return {
     ok: errors.length === 0,
-    value: errors.length ? null : { id, label: str(r.label, 24) || id, command },
+    value: errors.length ? null : {
+      id,
+      label: str(r.label, 24) || id,
+      command,
+      provider,
+      kind,
+      modelFlag,
+      promptFlag,
+      workdirFlag,
+      promptMode,
+      modelDiscovery,
+      approvalMode,
+      capabilities,
+      retryableExitCodes: Array.isArray(r.retryableExitCodes) ? r.retryableExitCodes.filter(code => Number.isInteger(code) && code >= 0 && code <= 255).slice(0, 10) : [],
+      roundtable: r.roundtable === true,
+    },
     errors,
   }
+}
+
+/**
+ * Validate a custom task pack without allowing it to mint capabilities. The
+ * role is the authority boundary; a pack can only request capabilities already
+ * granted to that role by the policy manifest.
+ */
+export function validateAgentPack(raw, allowedByRole = ROLE_CAPABILITIES) {
+  const errors = []
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, value: null, errors: ['agent pack must be an object'] }
+  const id = str(raw.id, 32)?.toLowerCase()
+  const role = str(raw.role, 20)
+  if (!id || !ID.test(id)) errors.push('id must be 1-40 chars of a-z 0-9 -')
+  if (!ROLE_CAPABILITIES[role]) errors.push('role must be researcher, builder, operator, or recovery')
+  const allowed = allowedByRole[role] instanceof Set ? allowedByRole[role] : new Set(allowedByRole[role] || [])
+  const capabilities = Array.isArray(raw.capabilities) ? [...new Set(raw.capabilities.map(v => str(v, 40)).filter(Boolean))].slice(0, 30) : []
+  if (capabilities.some(capability => !allowed.has(capability))) errors.push('capabilities exceed the assigned role policy')
+  const runtimes = Array.isArray(raw.preferredRuntimes) ? [...new Set(raw.preferredRuntimes.map(v => str(v, 32)).filter(Boolean))].slice(0, 12) : []
+  const gates = Array.isArray(raw.gates) ? raw.gates.map(v => str(v, 120)).filter(Boolean).slice(0, 20) : []
+  const prompt = str(raw.prompt, 4000)
+  if (!prompt || prompt.length < 80) errors.push('prompt must be at least 80 characters')
+  if (errors.length) return { ok: false, value: null, errors }
+  return { ok: true, errors: [], value: { id, label: str(raw.label, 60) || id, role, summary: str(raw.summary, 240) || '', capabilities, preferredRuntimes: runtimes, defaultModel: MODEL.test(String(raw.defaultModel || '')) ? String(raw.defaultModel) : 'auto', gates, prompt } }
 }
 
 /** A custom cast member — Pro's `~/.quorum/cast/*.json`, and bootstrap drafts. */

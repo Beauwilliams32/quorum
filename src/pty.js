@@ -1,6 +1,6 @@
 import os from 'node:os'
 import pty from 'node-pty'
-import { loadRuntimes } from './config.js'
+import { loadConfig, loadRuntimes } from './config.js'
 
 // One-keystroke launch profiles. Agent CLIs run inside an interactive login zsh
 // so they inherit the user's full PATH and (crucially) the machine's shared
@@ -13,7 +13,13 @@ import { loadRuntimes } from './config.js'
 // shell metacharacters) because it is about to be executed.
 function commandFor(profile) {
   const rt = loadRuntimes().find(r => r.id === profile)
-  return rt ? rt.command : 'true'
+  if (!rt) return 'true'
+  const model = loadConfig().modelMappings?.[profile]
+  if (!model) return rt.command
+  const quoted = `'${String(model).replaceAll("'", "'\\''")}'`
+  if (profile === 'ollama') return `ollama run ${quoted}`
+  if (rt.modelFlag) return `${rt.command} ${rt.modelFlag} ${quoted}`
+  return rt.command
 }
 const SCROLLBACK = 200_000
 
@@ -27,13 +33,14 @@ export class PtyManager {
 
   // `command` overrides the profile's default CLI. It is built server-side only
   // (never from raw client text) — see buildResumeCommand in server.js.
-  create(profile = 'shell', cwd, cols = 120, rows = 30, command = null) {
+  create(profile = 'shell', cwd, cols = 120, rows = 30, command = null, envOverrides = {}) {
     const shell = process.env.SHELL || '/bin/zsh'
     const cli = command || commandFor(profile)
     const args = profile === 'shell' && !command ? ['-l'] : ['-l', '-i', '-c', cli || 'true']
     // Strip CLAUDE* vars: this server may itself run under a Claude session and
     // a spawned `claude` must not think it's nested.
     const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' }
+    for (const [key, value] of Object.entries(envOverrides || {})) if (/^[A-Z][A-Z0-9_]{0,63}$/.test(key) && typeof value === 'string') env[key] = value.slice(0, 240)
     for (const k of Object.keys(env)) if (k.startsWith('CLAUDE')) delete env[k]
 
     const id = 't' + (++seq)

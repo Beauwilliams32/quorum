@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 2,
+  "name": "quorum-private-agent-control",
+  "roles": {
+    "researcher": {
+      "capabilities": ["discover", "read", "test"],
+      "permissionMode": "plan"
+    },
+    "builder": {
+      "capabilities": ["discover", "read", "test", "edit", "git.commit", "git.push", "git.merge", "git.tag"],
+      "permissionMode": "acceptEdits"
+    },
+    "operator": {
+      "capabilities": ["discover", "read", "test", "edit", "git.commit", "git.push", "git.merge", "git.tag", "deploy", "publish", "provider.change", "external.send", "migration.remote"],
+      "permissionMode": "acceptEdits"
+    },
+    "recovery": {
+      "capabilities": ["discover", "read", "recovery.inspect", "recovery.takeover"],
+      "permissionMode": "plan"
+    }
+  },
+  "actions": {
+    "discover": { "capability": "discover", "verification": "local-observation" },
+    "read": { "capability": "read", "verification": "local-observation" },
+    "test": { "capability": "test", "verification": "test-result" },
+    "edit": { "capability": "edit", "verification": "diff-review" },
+    "git.commit": { "capability": "git.commit", "verification": "git-status" },
+    "git.push": { "capability": "git.push", "verification": "remote-head" },
+    "git.merge": { "capability": "git.merge", "verification": "git-status" },
+    "git.tag": { "capability": "git.tag", "verification": "tag-exists" },
+    "deploy": { "capability": "deploy", "verification": "post-deploy-probe", "approval": "target-record" },
+    "publish": { "capability": "publish", "verification": "post-publish-probe", "approval": "target-record" },
+    "provider.change": { "capability": "provider.change", "verification": "provider-readback", "approval": "target-record" },
+    "external.send": { "capability": "external.send", "verification": "provider-readback", "approval": "target-record" },
+    "migration.remote": { "capability": "migration.remote", "verification": "migration-readback", "approval": "target-record" }
+  },
+  "protectedPaths": [
+    "~/.codex/auth.json",
+    "~/.claude/auth.json",
+    "~/.claude/projects",
+    "~/.hermes/logs",
+    "*/claude-mem/*",
+    "*/archive/*",
+    "*/Media/*",
+    "*/media/*",
+    "*/trading/*"
+  ],
+  "lease": {
+    "heartbeatSeconds": 120,
+    "ttlSeconds": 900,
+    "recoveryMisses": 3,
+    "maxClaimedPaths": 40
+  },
+  "retries": {
+    "maxAttempts": 3,
+    "backoffSeconds": [5, 30, 120],
+    "noProgressLimit": 3
+  },
+  "guardrails": {
+    "loopbackOnly": true,
+    "noSecretsInTelemetry": true,
+    "requireExplicitTargetForExternal": true,
+    "requirePostActionVerification": true,
+    "hardStopOnRepeatedFailure": true,
+    "shadowMode": false
+  },
+  "killSwitch": { "enabled": false, "reason": null }
+}

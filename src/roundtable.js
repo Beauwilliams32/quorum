@@ -25,12 +25,14 @@
 // (~$0.08 vs ~$0.27 with the default toolset loaded) and means a debate can
 // never edit a file as a side effect of arguing about it.
 
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { castMember, MODERATOR_ID } from './cast.js'
 import { dataDir, readDirs } from './paths.js'
+import { resolveClaudeCommand } from './collectors/services.js'
+import { loadConfig, loadRuntimes } from './config.js'
 
 const STORE = dataDir('roundtables')
 const TURN_TIMEOUT_MS = 180_000
@@ -43,13 +45,30 @@ const MAX_TOPIC = 600
 export const EST_COST_PER_TURN_USD = 0.08
 
 export const PHASES = ['brief', 'opening', 'clash', 'converge', 'verdict']
+const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,119}$/
+
+/** Normalize legacy Claude values and explicit provider:model references. */
+export function resolveModelRef(value, runtimes = loadRuntimes()) {
+  const raw = String(value || 'sonnet').trim()
+  const split = raw.indexOf(':')
+  const provider = split > 0 ? raw.slice(0, split).toLowerCase() : 'claude'
+  const requested = split > 0 ? raw.slice(split + 1) : raw
+  if (!SAFE_MODEL.test(requested)) throw new Error('model must be a simple provider:model name')
+  if (provider === 'claude') {
+    const model = ['sonnet', 'opus', 'haiku'].includes(requested) ? requested : 'sonnet'
+    return { provider, model, ref: `${provider}:${model}`, runtime: runtimes.find(r => r.id === provider) || null }
+  }
+  const runtime = runtimes.find(r => r.id === provider)
+  if (!runtime || runtime.kind !== 'local' || runtime.roundtable !== true) throw new Error(`runtime ${provider} is not enabled for local roundtables`)
+  return { provider, model: requested, ref: `${provider}:${requested}`, runtime }
+}
 
 /**
  * Tools and MCP servers are stripped for two independent reasons: cost (the
  * default toolset is ~33k tokens of cache creation per turn) and blast radius
  * (a debater with Edit can rewrite the code it is arguing about).
  */
-function turnArgs(prompt, persona, model, extra = []) {
+export function turnArgs(prompt, persona, model, extra = []) {
   return [
     '-p', prompt,
     '--output-format', 'json',
@@ -133,7 +152,15 @@ export class Roundtable {
     // own CLAUDE.md is loaded as context, so the debate argues about *this*
     // codebase instead of producing generic best-practice mush.
     this.cwd = opts.cwd && fs.existsSync(opts.cwd) ? opts.cwd : os.homedir()
-    this.model = opts.model === 'opus' || opts.model === 'haiku' ? opts.model : 'sonnet'
+    const selection = resolveModelRef(opts.model)
+    this.provider = selection.provider
+    this.model = selection.model
+    this.modelRef = selection.ref
+    this.ollamaHost = this.provider === 'ollama' ? loadConfig().ollamaHost : null
+    // Only server-side readiness resolution can select API-key mode. This
+    // marker is safe to persist and display; the key itself remains solely in
+    // the launched process environment.
+    this.authMode = this.provider === 'claude' ? (opts.authMode === 'api-key' ? 'api-key' : 'cli') : 'local'
     this.participants = unique
     this.phase = 'idle'
     this.turns = []
@@ -154,7 +181,10 @@ export class Roundtable {
       topic: this.topic,
       roomId: this.roomId,
       roomLabel: this.roomLabel,
+      provider: this.provider,
+      modelRef: this.modelRef,
       model: this.model,
+      authMode: this.authMode,
       participants: this.participants,
       phase: this.phase,
       turns: this.turns,
@@ -185,6 +215,9 @@ export class Roundtable {
     try {
       this.state.event({ kind: 'spawn', text: `roundtable "${this.topic.slice(0, 48)}" opened in ${this.roomLabel}` })
 
+      await this.preflight()
+      if (this.cancelled) return this.finish()
+
       await this.brief()
       if (this.cancelled) return this.finish()
 
@@ -202,6 +235,17 @@ export class Roundtable {
       this.error = String(e?.message || e)
     }
     return this.finish()
+  }
+
+  async preflight() {
+    if (this.provider !== 'ollama') return
+    await new Promise((resolve, reject) => {
+      execFile('ollama', ['show', this.model], { cwd: this.cwd, env: this.providerEnv(), timeout: 8_000, maxBuffer: 2e6 }, error => {
+        if (this.cancelled) return reject(new Error('cancelled'))
+        if (error) return reject(new Error(`Ollama model ${this.model} is unavailable; install it with "ollama pull ${this.model}"`))
+        resolve()
+      })
+    })
   }
 
   finish() {
@@ -337,7 +381,7 @@ export class Roundtable {
 
     let res
     try {
-      res = await this.exec(turnArgs(prompt, c.prompt, this.model))
+      res = await this.exec(this.buildInvocation(prompt, c.prompt))
     } catch (e) {
       const turn = {
         id: `${this.id}-${this.turns.length}`,
@@ -374,15 +418,39 @@ export class Roundtable {
     return turn
   }
 
-  exec(args) {
+  buildInvocation(prompt, persona) {
+    // `--bare` is the documented Claude CLI key path. It is added only when
+    // server-side readiness verified that a key is already in this process's
+    // environment; no client input can inject command arguments.
+    if (this.provider === 'claude') return { kind: 'claude', args: turnArgs(prompt, persona, this.model, this.authMode === 'api-key' ? ['--bare'] : []) }
+
+    // Local providers receive the persona and question as data over stdin or a
+    // single prompt argument. They never receive shell source, file tools, or
+    // credentials, and Ollama is always invoked in non-agent `run` mode.
+    const combined = `You are ${persona}\n\n${prompt}`
+    if (this.provider === 'ollama') return { kind: 'local', command: 'ollama', args: ['run', this.model], input: combined }
+    if (this.provider === 'gemini') return { kind: 'local', command: 'gemini', args: ['--approval-mode', 'plan', '--prompt', combined] }
+
+    const runtime = loadRuntimes().find(r => r.id === this.provider)
+    if (!runtime?.command) throw new Error(`runtime ${this.provider} has no executable command`)
+    const args = []
+    if (runtime.modelFlag) args.push(runtime.modelFlag, this.model)
+    if (runtime.promptMode === 'arg') args.push(runtime.promptFlag, combined)
+    return { kind: 'local', command: runtime.command, args, input: runtime.promptMode === 'arg' ? null : combined }
+  }
+
+  exec(invocation) {
+    if (invocation.kind === 'local') return this.execLocal(invocation)
     return new Promise((resolve, reject) => {
-      const child = execFile('claude', args, {
+      const command = resolveClaudeCommand()
+      if (!command) return reject(new Error('Claude Code CLI is unavailable in the Quorum launch environment'))
+      const child = execFile(command, invocation.args, {
         cwd: this.cwd,
         timeout: TURN_TIMEOUT_MS,
         maxBuffer: 16e6,
         // A debate turn must not inherit this process's Claude session vars,
         // or the spawned CLI treats itself as a nested session.
-        env: strippedEnv(),
+        env: this.providerEnv(),
       }, (err, stdout) => {
         this.children.delete(child)
         if (this.cancelled) return reject(new Error('cancelled'))
@@ -394,6 +462,42 @@ export class Roundtable {
       })
       this.children.add(child)
     })
+  }
+
+  execLocal({ command, args, input }) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, {
+        cwd: this.cwd,
+        env: this.providerEnv(),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      let stdout = ''
+      let stderr = ''
+      let settled = false
+      const finish = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); this.children.delete(child); fn(value) }
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM')
+        finish(reject, new Error('local model turn timed out'))
+      }, TURN_TIMEOUT_MS)
+      child.stdout.on('data', chunk => { stdout += String(chunk); if (stdout.length > 16e6) child.kill('SIGTERM') })
+      child.stderr.on('data', chunk => { stderr += String(chunk).slice(-4000) })
+      child.once('error', error => finish(reject, new Error(String(error.message || error))))
+      child.once('close', (code, signal) => {
+        const text = stdout.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '').trim()
+        if (this.cancelled) return finish(reject, new Error('cancelled'))
+        if (code !== 0 && !text) return finish(reject, new Error(stderr.trim() || `local model exited ${code ?? (signal || 'unknown')}`))
+        finish(resolve, { result: text, costUsd: null, sessionId: null })
+      })
+      this.children.add(child)
+      if (input != null) child.stdin.end(`${input}\n`)
+      else child.stdin.end()
+    })
+  }
+
+  providerEnv() {
+    const env = strippedEnv()
+    if (this.provider === 'ollama' && this.ollamaHost) env.OLLAMA_HOST = this.ollamaHost
+    return env
   }
 
   persist() {

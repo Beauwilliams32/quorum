@@ -1,6 +1,10 @@
 // Build the operator-facing view from already-collected local state. This is
 // intentionally a projection: it never reads a second source, returns raw
 // transcripts, or exposes credentials/config contents.
+function safeText(value, max = 180) {
+  return String(value || '').replace(/prompt/gi, '[redacted]').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
 export function buildOperations(stateData = {}, feed = [], ptys = [], catalog = {}) {
   const sessions = (stateData.sessions?.cards || []).slice(0, 40).map(session => ({
     id: session.id,
@@ -10,7 +14,7 @@ export function buildOperations(stateData = {}, feed = [], ptys = [], catalog = 
     branch: session.branch,
     kind: session.kind,
     active: Boolean(session.active),
-    summary: String(session.summary || '').replace(/\s+/g, ' ').trim().slice(0, 140),
+    summary: safeText(session.summary, 140),
     updatedAt: session.mtimeMs || null,
   }))
   const agents = (stateData.agents?.agents || []).slice(0, 40).map(agent => ({
@@ -68,12 +72,18 @@ export function buildOperations(stateData = {}, feed = [], ptys = [], catalog = 
     channels,
     cronJobs: (stateData.tasks?.tasks || []).filter(task => task.status !== 'completed').slice(0, 30).map(task => ({
       id: task.id,
-      subject: task.subject,
+      subject: safeText(task.subject, 180),
       status: task.status,
       live: Boolean(task.live),
       projectId: task.projectId,
       agent: task.agent,
     })),
-    events: feed.slice(-30).map(item => ({ kind: item.kind, ts: item.ts, text: String(item.text || '').replace(/\s+/g, ' ').trim().slice(0, 180) })),
+    events: feed.slice(-30).map(item => ({ kind: safeText(item.kind, 60), ts: item.ts, text: safeText(item.text) })),
+    agentControl: {
+      policy: stateData.agentControl?.policy || null,
+      runs: (stateData.agentControl?.runs || []).slice(0, 40).map(run => ({ id: run.id, runId: run.runId, runtime: run.runtime, role: run.role, repoRoot: run.repoRoot, worktree: run.worktree, branch: run.branch, owner: run.owner, phase: run.phase, status: run.status, heartbeatAt: run.heartbeatAt, leaseExpiresAt: run.leaseExpiresAt, missedHeartbeats: run.missedHeartbeats, checkpoints: run.checkpoints, tests: run.tests, blockers: run.blockers, disposition: run.disposition })),
+      claims: (stateData.agentControl?.claims || []).slice(0, 80).map(claim => ({ id: claim.id, runId: claim.runId, path: claim.path, status: claim.status, leaseExpiresAt: claim.leaseExpiresAt })),
+      actions: (stateData.agentControl?.actions || []).slice(0, 40).map(action => ({ id: action.id, runId: action.runId, action: action.action, status: action.status, verification: action.verification, createdAt: action.createdAt, updatedAt: action.updatedAt })),
+    },
   }
 }

@@ -21,14 +21,19 @@ import { buildHealth } from './src/health.js'
 import { publicCast } from './src/cast.js'
 import { loadEdition, editionInfo } from './src/edition.js'
 import { loadRuntimes, loadModels } from './src/config.js'
-import { buildCatalog, publicCatalog } from './src/catalog.js'
+import { buildCatalog, publicCatalog, roundtableModelOptions } from './src/catalog.js'
 import { executeAction, previewAction } from './src/command.js'
-import { RoundtableRegistry, EST_COST_PER_TURN_USD } from './src/roundtable.js'
+import { RoundtableRegistry, EST_COST_PER_TURN_USD, resolveModelRef } from './src/roundtable.js'
 import { debateToMarkdown } from './src/decision-record.js'
 import { buildOperations } from './src/operations.js'
+import { AgentControlManager } from './src/agent-control/manager.js'
+import { publicAgentPacks, resolveAgentPack } from './src/agents/packs.js'
+import { runDoctor } from './src/agent-control/doctor.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const PORT = Number(process.env.PORT || 4747)
+const portIndex = process.argv.indexOf('--port')
+const cliPort = portIndex >= 0 ? process.argv[portIndex + 1] : undefined
+const PORT = Number(cliPort || process.env.PORT || 4747)
 const PUB = path.join(__dirname, 'public')
 const startedAt = Date.now()
 
@@ -46,7 +51,58 @@ const MIME = {
 const state = new State()
 const ptys = new PtyManager(state)
 const roundtables = new RoundtableRegistry(state)
+const agentControl = new AgentControlManager()
 roundtables.loadArchive()
+const supervisedRuns = new Map()
+
+function sendJson(res, status, value) {
+  res.statusCode = status
+  res.setHeader('content-type', 'application/json')
+  res.setHeader('cache-control', 'no-store')
+  res.end(JSON.stringify(value))
+}
+
+async function readJson(req) {
+  let body = ''
+  for await (const chunk of req) {
+    body += chunk
+    if (body.length > 200_000) throw new Error('request body too large')
+  }
+  return JSON.parse(body || '{}')
+}
+
+function refreshAgentControl() { state.update('agentControl', agentControl.snapshot()) }
+refreshAgentControl()
+
+function emitAgentEvent(type, run) {
+  state.broadcast({ type, run: { id: run.runId, status: run.status, phase: run.phase, heartbeatAt: run.heartbeatAt, leaseExpiresAt: run.leaseExpiresAt, packId: run.packId, runtime: run.runtime } })
+}
+
+function superviseRun(run, rec) {
+  rec.quorumRunId = run.runId
+  const interval = Math.max(5000, (agentControl.policy.lease?.heartbeatSeconds || 120) * 1000)
+  const timer = setInterval(() => {
+    try { const updated = agentControl.heartbeat(run.runId, { phase: 'running' }); refreshAgentControl(); emitAgentEvent('agent.run.heartbeat', updated) }
+    catch { clearInterval(timer); supervisedRuns.delete(run.runId) }
+  }, interval)
+  supervisedRuns.set(run.runId, { ptyId: rec.id, timer })
+  emitAgentEvent('agent.run.created', run)
+  rec.term.onExit(({ exitCode }) => {
+    clearInterval(timer); supervisedRuns.delete(run.runId)
+    try {
+      const checkpoint = agentControl.checkpoint(run.runId, { reason: exitCode === 0 ? 'process-exit' : 'failure', phase: 'finished', verification: [`exit:${exitCode ?? 'unknown'}`] })
+      emitAgentEvent('agent.run.checkpoint', agentControl.getRun(run.runId))
+      const closed = agentControl.close(run.runId, { disposition: exitCode === 0 ? 'completed' : 'blocked', blockers: exitCode === 0 ? [] : [`process exit ${exitCode ?? 'unknown'}`], nextOwnerAction: exitCode === 0 ? '' : `inspect run ${run.runId} and resume with a new task` })
+      refreshAgentControl(); emitAgentEvent('agent.run.closed', closed)
+      void checkpoint
+    } catch { /* closeout is best-effort after the PTY exits */ }
+  })
+}
+
+function rejectForeignOrigin(req) {
+  const origin = req.headers.origin
+  return origin && !isAllowedOrigin(origin, PORT)
+}
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://localhost')
@@ -62,24 +118,98 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/api/catalog') {
     res.setHeader('content-type', 'application/json')
     res.setHeader('cache-control', 'no-store')
-    return res.end(JSON.stringify(publicCatalog(buildCatalog())))
+    const catalog = buildCatalog()
+    return res.end(JSON.stringify({ ...publicCatalog(catalog), agentPacks: publicAgentPacks({ runtimes: loadRuntimes(), modelOptions: roundtableModelOptions({ catalog }) }) }))
   }
   if (u.pathname === '/api/operations') {
     res.setHeader('content-type', 'application/json')
     res.setHeader('cache-control', 'no-store')
     return res.end(JSON.stringify(buildOperations(state.data, state.feed, ptys.list(), publicCatalog(buildCatalog()))))
   }
+  if (u.pathname === '/api/agent-control/runs' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => {
+      const run = agentControl.createRun(input)
+      if (input.action) agentControl.createAction(run.runId, { action: input.action, target: input.target })
+      refreshAgentControl(); sendJson(res, 201, { run, control: agentControl.snapshot() })
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/agent-control/runs' || u.pathname === '/api/agent-control/claims') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
+    const snapshot = agentControl.snapshot()
+    const key = u.pathname.endsWith('/runs') ? 'runs' : 'claims'
+    return sendJson(res, 200, { policy: snapshot.policy, [key]: snapshot[key], actions: snapshot.actions })
+  }
+  if (u.pathname === '/api/agent-control/packs' && req.method === 'GET') {
+    const catalog = buildCatalog()
+    return sendJson(res, 200, { packs: publicAgentPacks({ runtimes: loadRuntimes(), modelOptions: roundtableModelOptions({ catalog }) }) })
+  }
+  if (u.pathname === '/api/agent-control/runtimes' && req.method === 'GET') {
+    return sendJson(res, 200, { runtimes: loadRuntimes().map(runtime => ({ id: runtime.id, label: runtime.label, command: runtime.command, kind: runtime.kind || 'custom', provider: runtime.provider || runtime.id, promptMode: runtime.promptMode || 'stdin', modelDiscovery: runtime.modelDiscovery || 'none', builtin: runtime.builtin === true })) })
+  }
+  if (u.pathname === '/api/agent-control/doctor' && req.method === 'GET') {
+    runDoctor().then(report => sendJson(res, 200, report)).catch(error => sendJson(res, 500, { error: String(error.message || error) }))
+    return
+  }
+  const heartbeat = u.pathname.match(/^\/api\/agent-control\/runs\/([^/]+)\/heartbeat$/)
+  if (heartbeat && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => { const run = agentControl.heartbeat(heartbeat[1], input); refreshAgentControl(); sendJson(res, 200, { run }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const checkpoint = u.pathname.match(/^\/api\/agent-control\/runs\/([^/]+)\/checkpoint$/)
+  if (checkpoint && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => { const record = agentControl.checkpoint(checkpoint[1], input); refreshAgentControl(); sendJson(res, 201, { checkpoint: record }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const close = u.pathname.match(/^\/api\/agent-control\/runs\/([^/]+)\/close$/)
+  if (close && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => { const run = agentControl.close(close[1], input); refreshAgentControl(); sendJson(res, 200, { run }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const recover = u.pathname.match(/^\/api\/agent-control\/runs\/([^/]+)\/recover$/)
+  if (recover && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    try {
+      const replacements = agentControl.recover({ now: Date.now() })
+      const replacement = replacements.find(run => run.parentTask === recover[1])
+      if (!replacement) return sendJson(res, 409, { error: 'run is not yet eligible for recovery', runs: replacements })
+      refreshAgentControl(); return sendJson(res, 201, { run: replacement })
+    } catch (error) { return sendJson(res, 400, { error: String(error.message || error) }) }
+  }
+  const cancelRun = u.pathname.match(/^\/api\/agent-control\/runs\/([^/]+)\/cancel$/)
+  if (cancelRun && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => { const supervised = supervisedRuns.get(cancelRun[1]); if (supervised) ptys.kill(supervised.ptyId); const run = agentControl.cancel(cancelRun[1], input); refreshAgentControl(); emitAgentEvent('agent.run.closed', run); sendJson(res, 200, { run }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const actionRoute = u.pathname.match(/^\/api\/agent-control\/actions\/([^/]+)\/(approve|cancel)$/)
+  if (actionRoute && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    Promise.resolve().then(() => actionRoute[2] === 'approve' ? agentControl.approveAction(actionRoute[1]) : agentControl.cancelAction(actionRoute[1])).then(action => { refreshAgentControl(); sendJson(res, 200, { action }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
   if (u.pathname === '/api/command') {
     if (req.method !== 'POST') { res.statusCode = 405; return res.end('method not allowed') }
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
     let body = ''
     req.on('data', chunk => { body += chunk })
     req.on('end', () => {
       try {
         const input = JSON.parse(body || '{}')
-        const preview = previewAction(input, buildCatalog(), state, ptys)
-        const result = input.confirm === true ? executeAction(preview, input, { state, ptys, startPty: (profile, roomId) => {
+        const catalog = buildCatalog()
+        const preview = previewAction({ ...input, modelOptions: roundtableModelOptions({ catalog }) }, catalog, state, ptys)
+        const result = input.confirm === true ? executeAction(preview, input, { state, ptys, startPty: (profile, roomId, launch) => {
           const room = (state.data.projects?.rooms || []).find(r => r.id === roomId)
-          const rec = ptys.create(profile, room?.cwd, 120, 30)
+          const pack = preview.packId ? resolveAgentPack(preview.packId) : null
+          const run = pack ? agentControl.createRun({ runtime: profile, role: pack.role, packId: pack.id, modelRef: preview.modelRef, repoRoot: room?.cwd, worktree: room?.cwd, plannedActions: pack.capabilities, requiredGates: pack.gates }) : null
+          const rec = ptys.create(profile, room?.cwd, 120, 30, launch?.shellCommand || null, run ? { QUORUM_AGENT_PACK: pack.id, QUORUM_AGENT_RUN_ID: run.runId } : {})
+          if (run) {
+            superviseRun(run, rec); refreshAgentControl()
+          }
           try { stampPresence({ projectId: room?.id, agent: profile, ptyId: rec.id, cwd: rec.cwd }) } catch { /* best-effort */ }
           return rec
         } }) : { ok: false, requiresConfirmation: true }
@@ -151,19 +281,22 @@ wss.on('connection', ws => {
   ws.send(JSON.stringify({ type: 'pty.list', ptys: ptys.list() }))
   // The cast is static for the life of the process, so it rides the handshake
   // rather than the 2s collector tick.
+  // Launchable runtimes + debate models, built-ins plus the user's config —
+  // the client renders its buttons and pickers from these, never a hardcoded
+  // list, so adding a validated runtime is the integration story.
+  const catalog = buildCatalog()
   ws.send(JSON.stringify({
     type: 'cast',
     cast: publicCast(editionInfo().locked),
     edition: editionInfo(),
     estCostPerTurnUsd: EST_COST_PER_TURN_USD,
-    // Launchable runtimes + debate models, built-ins plus the user's config —
-    // the client renders its buttons and pickers from these, never a hardcoded
-    // list, so "add gemini to config.json" is the entire integration story.
     runtimes: loadRuntimes().map(r => ({ id: r.id, label: r.label, builtin: !!r.builtin })),
     models: loadModels(),
-    catalog: publicCatalog(buildCatalog()),
+    modelOptions: roundtableModelOptions({ catalog }),
+    catalog: { ...publicCatalog(catalog), agentPacks: publicAgentPacks({ runtimes: loadRuntimes(), modelOptions: roundtableModelOptions({ catalog }) }) },
   }))
   ws.send(JSON.stringify({ type: 'rt.list', ...roundtables.list() }))
+  ws.send(JSON.stringify({ type: 'agent-control.runtimes', runtimes: loadRuntimes().map(runtime => ({ id: runtime.id, label: runtime.label, kind: runtime.kind || 'custom', provider: runtime.provider || runtime.id, builtin: runtime.builtin === true })) }))
   const watcher = new TranscriptWatcher(ws)
 
   ws.on('message', raw => {
@@ -211,21 +344,46 @@ function handle(ws, m, watcher) {
     case 'rt.start': startRoundtable(m); break
     case 'rt.cancel': roundtables.cancel(String(m.id || '')); break
     case 'command.preview': {
-      const preview = previewAction(m, buildCatalog(), state, ptys)
+      const catalog = buildCatalog()
+      const preview = previewAction({ ...m, modelOptions: roundtableModelOptions({ catalog }) }, catalog, state, ptys)
       ws.send(JSON.stringify({ type: 'command.preview', preview }))
       break
     }
     case 'command.execute': {
-      const preview = previewAction(m, buildCatalog(), state, ptys)
-      const result = executeAction(preview, m, { state, ptys, startPty: (profile, roomId) => {
+      const catalog = buildCatalog()
+      const preview = previewAction({ ...m, modelOptions: roundtableModelOptions({ catalog }) }, catalog, state, ptys)
+      const result = executeAction(preview, m, { state, ptys, startPty: (profile, roomId, launch) => {
         const room = (state.data.projects?.rooms || []).find(r => r.id === roomId)
         if (!room) throw new Error('unknown project room')
-        const rec = ptys.create(profile, room.cwd, m.cols || 120, m.rows || 30)
+        const pack = preview.packId ? resolveAgentPack(preview.packId) : null
+        const run = pack ? agentControl.createRun({ runtime: profile, role: pack.role, packId: pack.id, modelRef: preview.modelRef, repoRoot: room.cwd, worktree: room.cwd, plannedActions: pack.capabilities, requiredGates: pack.gates }) : null
+        const rec = ptys.create(profile, room.cwd, m.cols || 120, m.rows || 30, launch?.shellCommand || null, run ? { QUORUM_AGENT_PACK: pack.id, QUORUM_AGENT_RUN_ID: run.runId } : {})
+        if (run) {
+          superviseRun(run, rec); refreshAgentControl()
+        }
         ptys.attach(rec.id, ws)
         return rec
       } })
       ws.send(JSON.stringify({ type: 'command.done', preview, result }))
       break
+    }
+    case 'agent-control.heartbeat': {
+      const run = agentControl.heartbeat(String(m.runId || ''), { phase: m.phase }); refreshAgentControl(); emitAgentEvent('agent.run.heartbeat', run); ws.send(JSON.stringify({ type: 'agent-control.updated', run })); break
+    }
+    case 'agent-control.checkpoint': {
+      const record = agentControl.checkpoint(String(m.runId || ''), m); refreshAgentControl(); emitAgentEvent('agent.run.checkpoint', agentControl.getRun(record.runId)); ws.send(JSON.stringify({ type: 'agent-control.checkpoint', checkpoint: record })); break
+    }
+    case 'agent-control.close': {
+      const run = agentControl.close(String(m.runId || ''), m); refreshAgentControl(); emitAgentEvent('agent.run.closed', run); ws.send(JSON.stringify({ type: 'agent-control.updated', run })); break
+    }
+    case 'agent-control.cancel': {
+      const runId = String(m.runId || '')
+      const supervised = supervisedRuns.get(runId)
+      if (supervised) ptys.kill(supervised.ptyId)
+      const run = agentControl.cancel(runId, m); refreshAgentControl(); emitAgentEvent('agent.run.closed', run); ws.send(JSON.stringify({ type: 'agent-control.updated', run })); break
+    }
+    case 'agent-control.approve': {
+      const action = agentControl.approveAction(String(m.actionId || '')); refreshAgentControl(); ws.send(JSON.stringify({ type: 'agent-control.action', action })); break
     }
   }
 }
@@ -243,18 +401,24 @@ function startRoundtable(m) {
   if (blocked.length)
     throw new Error(`${blocked.join(', ')} ${blocked.length > 1 ? 'are' : 'is'} part of Quorum Pro — unlock or seat someone else`)
 
+  const catalog = buildCatalog()
+  const selection = resolveModelRef(m.model || 'claude:sonnet')
+  const option = roundtableModelOptions({ catalog }).find(item => item.id === selection.ref)
+  if (!option) throw new Error(`${selection.ref} is not configured for roundtables`)
+  if (!option.available) throw new Error(`${option.label} is not available in the Quorum launch environment`)
+
   const room = (state.data.projects?.catalog || []).find(r => r.id === m.roomId) || null
   // Resolve auth at the spend boundary, rather than trusting the five-second
   // collector snapshot or a browser-provided claim. The function returns only
   // a mode label, never a credential.
-  const authMode = resolveRoundtableAuth(readAuth(), m.authMode)
+  const authMode = selection.provider === 'claude' ? resolveRoundtableAuth(readAuth(), m.authMode) : 'local'
   const rt = roundtables.start({
     topic: m.topic,
     roomId: room?.id || null,
     roomLabel: room?.label || 'the workspace',
     cwd: room?.cwd || null,
     participants: m.participants,
-    model: m.model,
+    model: selection.ref,
     authMode,
   })
   return rt

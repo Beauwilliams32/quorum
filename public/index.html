@@ -105,6 +105,17 @@
       <div id="command-connection" class="command-connection">catalog loading…</div>
     </div>
     <div id="command-pulse" class="command-pulse"></div>
+    <section class="task-workbench" aria-labelledby="task-workbench-title">
+      <div class="workbench-head"><div><span class="eyebrow">TASK-SPECIFIC AGENTS</span><h2 id="task-workbench-title">Pick the job. Route the brains.</h2><p>Built-in contracts keep each agent focused while Quorum lets you use Claude, Codex, Copilot, Hermes, Gemini, Ollama, or any validated local CLI.</p></div><span class="workbench-badge">NO KEYS IN QUORUM</span></div>
+      <form id="agent-form" class="agent-form" autocomplete="off">
+        <label class="fld"><span>Agent pack</span><select id="agent-pack"></select></label>
+        <label class="fld"><span>Harness</span><select id="agent-runtime"></select></label>
+        <label class="fld"><span>Model / route</span><select id="agent-model"></select></label>
+        <label class="fld agent-task"><span>Task brief <em>bounded, concrete, evidence-first</em></span><textarea id="agent-task" rows="3" placeholder="Review the current auth flow, run the focused checks, and report the highest-risk gaps with exact file evidence."></textarea></label>
+        <div id="agent-brief" class="agent-brief"></div>
+        <button type="submit" id="agent-preview">preview task run</button>
+      </form>
+    </section>
     <div class="col-head">MODEL + HARNESS LIBRARY</div>
     <div id="command-library" class="command-library"><div class="empty">loading local catalog…</div></div>
   </section>
@@ -112,6 +123,7 @@
     <div class="card"><div class="card-head">GUARDED CONTROL</div><p class="hint">Every launch, stop, route, and chain is previewed, explicitly confirmed, and written to the local event feed.</p><div id="command-preview" class="command-preview">select a runtime to preview launch</div><div id="command-actions" class="deck-actions"></div></div>
     <div class="card"><div class="card-head">DECISION FLOW</div><div class="command-flow">Question <b>→</b> Roundtable <b>→</b> Approval <b>→</b> Task <b>→</b> Harness</div><button id="command-roundtable" type="button">open roundtable handoff</button></div>
     <div class="card"><div class="card-head">SAFETY BOUNDARY</div><div class="kv"><div>storage <b>local only</b></div><div>auth <b>existing CLI / env</b></div><div>secrets <b>never displayed</b></div><div>pet assets <b>~/.quorum/pets</b></div></div></div>
+    <div class="card"><div class="card-head">AGENT CONTROL <span>LEASED</span></div><div id="agent-control-card" class="agent-control-card"><div class="empty-sm">control plane warming up…</div></div></div>
   </aside>
 </main>
 
@@ -133,21 +145,22 @@
         <div id="rt-cast"></div>
       </div>
       <label class="fld">
-        <span>Model</span>
+        <span>Provider / model <em>cloud or local — choose explicitly</em></span>
         <select id="rt-model">
-          <option value="sonnet">sonnet — balanced</option>
-          <option value="opus">opus — deepest, priciest</option>
-          <option value="haiku">haiku — fastest, cheapest</option>
+          <option value="claude:sonnet">Claude · sonnet — balanced</option>
+          <option value="claude:opus">Claude · opus — deepest, priciest</option>
+          <option value="claude:haiku">Claude · haiku — fastest, cheapest</option>
+          <option value="ollama:gemma3:latest">Ollama · gemma3:latest — local</option>
         </select>
       </label>
       <label class="fld">
-        <span>Authentication <em>Quorum never stores or displays keys</em></span>
+        <span>Provider access <em>local models need no keys; cloud auth stays runtime-owned</em></span>
         <select id="rt-auth-mode"></select>
       </label>
       <div id="rt-estimate" class="rt-estimate"></div>
       <button type="submit" id="rt-start">convene</button>
       <button type="button" id="rt-cancel" class="danger hidden">cancel — stops spending</button>
-      <p class="hint">Each turn is a separate headless agent with tools and MCP stripped: debaters reason, they never touch your files.</p>
+      <p class="hint">Each turn is a separate headless provider call with tools and MCP stripped. Claude uses its signed-in CLI; local models run on-device through Ollama or an explicitly configured local CLI.</p>
     </form>
     <div class="col-head">ARCHIVE</div>
     <div id="rt-archive" class="empty-sm">no debates yet</div>

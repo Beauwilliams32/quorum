@@ -165,6 +165,10 @@ function readHead(file, n) {
   } catch { return '' }
 }
 
+function canonicalSessionDir(dir) {
+  try { return fs.realpathSync(dir) } catch { return path.resolve(dir) }
+}
+
 function summarizeCodex(lines) {
   for (let i = lines.length - 1; i >= 0; i--) {
     const p = lines[i].payload
@@ -191,7 +195,7 @@ export class TranscriptWatcher {
   watch(file, agent = 'claude') {
     this.stop()
     const real = fs.realpathSync(file) // throws if missing
-    if (!withinDir(real, CLAUDE_PROJECTS) && !withinDir(real, CODEX_SESSIONS))
+    if (!withinDir(real, canonicalSessionDir(CLAUDE_PROJECTS)) && !withinDir(real, canonicalSessionDir(CODEX_SESSIONS)))
       throw new Error('refusing to watch a path outside session directories')
     this.file = real
     this.agent = agent

@@ -1,0 +1,113 @@
+#!/usr/bin/env node
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { AgentControlManager } from '../src/agent-control/manager.js'
+import { actionAllowed, classifyAction, rolePolicy } from '../src/agent-control/policy.js'
+import { buildLaunch, buildTaskLaunch, detectRuntimes, spawnLaunch } from '../src/agent-control/adapters.js'
+import { publicAgentPacks, resolveAgentPack, agentPackPromptPath } from '../src/agents/packs.js'
+import { loadRuntimes } from '../src/config.js'
+import { runDoctor } from '../src/agent-control/doctor.js'
+
+const manager = new AgentControlManager()
+const args = process.argv.slice(2)
+const command = args.shift() || 'doctor'
+const value = flag => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined }
+const has = flag => args.includes(flag)
+const json = value => console.log(JSON.stringify(value, null, 2))
+const MANAGED_LAUNCHD_PREFIXES = ['ai.hermes.', 'com.beauwilliams.', 'com.tridentsocial.', 'com.williamsmedia.']
+const isManagedLaunchAgent = file => MANAGED_LAUNCHD_PREFIXES.some(prefix => path.basename(file).startsWith(prefix))
+const help = () => console.log(`agent doctor\nagent packs\nagent run [--runtime claude] [--role researcher|builder|operator|recovery] [--repo PATH] [--target-json JSON] -- COMMAND [ARGS...]\nagent run --pack builder --runtime claude --repo PATH --task "..."\nagent claim --role ROLE --repo PATH [--worktree PATH]\nagent heartbeat RUN_ID [--phase NAME]\nagent checkpoint RUN_ID [--reason TEXT] [--tests JSON] [--changed-files JSON]\nagent approve ACTION_ID\nagent close RUN_ID [--disposition completed|blocked] [--next-owner-action TEXT]\nagent recover`)
+function localWiring(home = process.env.HOME || os.homedir()) {
+  const launchAgents = path.join(home, 'Library', 'LaunchAgents')
+  const launchd = []
+  try {
+    for (const name of fs.readdirSync(launchAgents).filter(name => name.endsWith('.plist'))) {
+      const file = path.join(launchAgents, name)
+      const raw = fs.readFileSync(file, 'utf8')
+      const blocks = []
+      const program = raw.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)
+      if (program) blocks.push(program[1])
+      const working = raw.match(/<key>WorkingDirectory<\/key>\s*<string>([\s\S]*?)<\/string>/)
+      if (working) blocks.push(working[1])
+      const paths = blocks.flatMap(block => [...block.matchAll(/<string>(\/[\s\S]*?)<\/string>/g)].map(match => match[1])).map(value => value.replaceAll('&amp;', '&'))
+      launchd.push({ file, managed: isManagedLaunchAgent(file), missing: paths.filter(candidate => !fs.existsSync(candidate)) })
+    }
+  } catch { /* optional on non-macOS hosts */ }
+  const scheduledRoot = path.join(home, '.claude', 'scheduled-tasks')
+  const scheduledTasks = []
+  try {
+    for (const name of fs.readdirSync(scheduledRoot)) {
+      const dir = path.join(scheduledRoot, name)
+      if (!fs.statSync(dir).isDirectory()) continue
+      scheduledTasks.push({ name, skill: path.join(dir, 'SKILL.md'), exists: fs.existsSync(path.join(dir, 'SKILL.md')) })
+    }
+  } catch { /* optional */ }
+  return { launchd, scheduledTasks, hermesConfig: fs.existsSync(path.join(home, '.hermes', 'config.yaml')) }
+}
+
+if (command === 'help' || command === '--help' || command === '-h') { help(); process.exit(0) }
+if (command === 'doctor') {
+  const repo = value('--repo') || process.cwd()
+  let gitRoot = repo
+  try { gitRoot = (await import('node:child_process')).execFileSync('git', ['-C', repo, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim() } catch { /* optional */ }
+  const wiring = localWiring()
+  const managedMissing = wiring.launchd.filter(item => item.managed && item.missing.length).map(item => ({ file: item.file, missing: item.missing }))
+  const unmanagedMissing = wiring.launchd.filter(item => !item.managed && item.missing.length).map(item => ({ file: item.file, missing: item.missing }))
+  const report = await runDoctor()
+  json({ ok: report.ok && managedMissing.length === 0 && wiring.scheduledTasks.every(item => item.exists), policy: manager.summary(), repoRoot: path.resolve(gitRoot), runtimes: report.runtimes, providers: report.providers, launchd: report.launchd, wiring, diagnostics: { managedMissing, unmanagedMissing, blockers: report.blockers }, node: process.version, stateDir: manager.store.dir })
+  process.exit(0)
+}
+if (command === 'packs') {
+  json(publicAgentPacks({ runtimes: detectRuntimes(), modelOptions: [] }))
+  process.exit(0)
+}
+if (command === 'claim') {
+  const role = value('--role') || 'researcher'; rolePolicy(manager.policy, role)
+  json(manager.createRun({ role, runtime: value('--runtime') || 'generic', repoRoot: value('--repo') || process.cwd(), worktree: value('--worktree'), branch: value('--branch'), parentTask: value('--parent-task'), owner: value('--owner'), claimedPaths: value('--claim') ? [value('--claim')] : undefined, plannedActions: value('--planned-actions') ? JSON.parse(value('--planned-actions')) : undefined }))
+  process.exit(0)
+}
+if (command === 'heartbeat') { json(manager.heartbeat(args[0], { phase: value('--phase') })); process.exit(0) }
+if (command === 'checkpoint') { json(manager.checkpoint(args[0], { reason: value('--reason'), phase: value('--phase'), tests: value('--tests') ? JSON.parse(value('--tests')) : [], changedFiles: value('--changed-files') ? JSON.parse(value('--changed-files')) : [], blockers: value('--blockers') ? JSON.parse(value('--blockers')) : [], verification: value('--verification') ? JSON.parse(value('--verification')) : [] })); process.exit(0) }
+if (command === 'approve') { json(manager.approveAction(args[0])); process.exit(0) }
+if (command === 'cancel') { json(manager.cancelAction(args[0])); process.exit(0) }
+if (command === 'cancel-run') { json(manager.cancel(args[0], { nextOwnerAction: 'inspect the preserved checkpoint before resuming' })); process.exit(0) }
+if (command === 'close') { json(manager.close(args[0], { disposition: value('--disposition'), nextOwnerAction: value('--next-owner-action'), changedFiles: value('--changed-files') ? JSON.parse(value('--changed-files')) : [], checks: value('--checks') ? JSON.parse(value('--checks')) : [], blockers: value('--blockers') ? JSON.parse(value('--blockers')) : [] })); process.exit(0) }
+if (command === 'recover') { json(manager.recover()); process.exit(0) }
+if (command === 'run') {
+  const pack = value('--pack') ? resolveAgentPack(value('--pack')) : null
+  const role = pack?.role || value('--role') || 'researcher'
+  const runtime = value('--runtime') || 'generic'
+  const repo = path.resolve(value('--repo') || process.cwd())
+  const separator = args.indexOf('--')
+  const argv = separator >= 0 ? args.slice(separator + 1) : []
+  if (pack && !value('--task')?.trim()) throw new Error('--task is required with --pack')
+  const runtimeSpec = loadRuntimes().find(item => item.id === runtime)
+  let packPromptFile = null
+  if (pack) { try { packPromptFile = agentPackPromptPath(pack.id) } catch { /* validated custom packs keep contracts local to config */ } }
+  const plan = pack
+    ? buildTaskLaunch({ runtime, runtimeSpec, role, cwd: repo, task: value('--task'), model: value('--model') || '', promptFile: packPromptFile })
+    : buildLaunch({ runtime, role, cwd: repo, argv })
+  const action = classifyAction([plan.command, ...plan.args])
+  const target = value('--target-json') ? JSON.parse(value('--target-json')) : null
+  const run = manager.createRun({ role, runtime, packId: pack?.id, modelRef: value('--model'), repoRoot: repo, worktree: repo, plannedActions: pack?.capabilities || [action], requiredGates: pack?.gates || ['project-guide', 'git-status'] })
+  const allowed = actionAllowed(manager.policy, role, action, { target })
+  if (!allowed.ok) {
+    manager.close(run.runId, { disposition: 'blocked', blockers: [allowed.reason], nextOwnerAction: 'choose a role and capability that matches the command' })
+    console.error(`blocked: ${allowed.reason} (run ${run.runId})`)
+    process.exit(3)
+  }
+  if (['deploy', 'publish', 'provider.change', 'external.send', 'migration.remote'].includes(action)) {
+    const record = manager.createAction(run.runId, { action, target })
+    if (!has('--approve')) { console.error(`blocked: action ${action} requires approval (${record.id})`); manager.close(run.runId, { disposition: 'blocked', blockers: [`pending approval ${record.id}`] }); process.exit(3) }
+    manager.approveAction(record.id)
+  }
+  console.error(`run_id: ${run.runId}`)
+  const timer = setInterval(() => { try { manager.heartbeat(run.runId, { phase: 'running' }) } catch { clearInterval(timer) } }, (manager.policy.lease?.heartbeatSeconds || 120) * 1000)
+  const result = await new Promise(resolve => spawnLaunch(plan, { onExit: resolve }))
+  clearInterval(timer)
+  manager.checkpoint(run.runId, { reason: result.code === 0 ? 'process-exit' : 'failure', phase: 'finished', tests: [], verification: [`exit:${result.code ?? 'null'} signal:${result.signal || 'none'}`] })
+  manager.close(run.runId, { disposition: result.code === 0 ? 'completed' : 'blocked', blockers: result.code === 0 ? [] : [`process exit ${result.code ?? result.signal}`], nextOwnerAction: result.code === 0 ? '' : 'inspect checkpoint and resume with the run ID' })
+  process.exit(result.code || 0)
+}
+help(); process.exit(2)
