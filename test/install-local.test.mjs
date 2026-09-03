@@ -32,7 +32,7 @@ test('installer dry-run is portable and writes nothing', () => {
 test('installer writes a client-specific LaunchAgent without loading it', () => {
   const source = fixture();
   const home = mkdtempSync(join(tmpdir(), 'quorum-installer-home-'));
-  execFileSync(process.execPath, [script, '--source', source, '--home', home, '--port', '4878', '--install'], { encoding: 'utf8' });
+  execFileSync(process.execPath, [script, '--platform', 'darwin', '--source', source, '--home', home, '--port', '4878', '--install'], { encoding: 'utf8' });
   const plistPath = join(home, 'Library', 'LaunchAgents', 'com.tridentsocial.quorum.plist');
   const plist = readFileSync(plistPath, 'utf8');
   assert.match(plist, new RegExp(`<string>${source}/server\\.js</string>`));

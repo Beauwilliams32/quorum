@@ -32,7 +32,7 @@ test('managed runtime links provider session, lease closeout, mission task, and 
   const mission = missions.create({ title: 'Managed run', objective: 'Exercise the runtime supervisor.', tasks: [{ id: 'task', title: 'Run agent' }] })
   const child = fakeChild()
   const memoryCalls = []
-  const manager = new RuntimeManager({ agentControl: control, missions, memoryBridge: { recall: async () => '', captureCloseout: async input => memoryCalls.push(input), writeMissionNote: () => ({ ok: true }) }, spawnImpl: async () => child, heartbeatMs: 60_000 })
+  const manager = new RuntimeManager({ agentControl: control, missions, memoryBridge: { recall: async () => '', captureCloseout: async input => memoryCalls.push(input), writeMissionNote: () => ({ ok: true }) }, executablePathImpl: () => true, spawnImpl: async () => child, heartbeatMs: 60_000 })
   const started = await manager.start({ missionId: mission.id, taskId: 'task', runtime: 'codex', role: 'builder', cwd: dir, worktree: dir, task: 'run bounded task' })
   child.stdout.emit('data', '{"type":"thread.started","thread_id":"thread-abc"}\n')
   child.stdout.emit('data', '{"type":"turn.completed","thread_id":"thread-abc"}\n')
@@ -58,7 +58,7 @@ test('managed runtime cancellation sends termination and records cancelled task'
   const mission = missions.create({ title: 'Cancel run', objective: 'Stop safely.', tasks: [{ id: 'task', title: 'Long task' }] })
   const child = fakeChild()
   const signals = []
-  const manager = new RuntimeManager({ agentControl: control, missions, memoryBridge: { recall: async () => '' }, spawnImpl: async () => child, processKillImpl: (pid, signal) => signals.push({ pid, signal }), heartbeatMs: 60_000 })
+  const manager = new RuntimeManager({ agentControl: control, missions, memoryBridge: { recall: async () => '' }, executablePathImpl: () => true, spawnImpl: async () => child, processKillImpl: (pid, signal) => signals.push({ pid, signal }), heartbeatMs: 60_000 })
   const started = await manager.start({ missionId: mission.id, taskId: 'task', runtime: 'claude', role: 'builder', cwd: dir, worktree: dir, task: 'wait' })
   manager.cancel(started.run.runId)
   assert.deepEqual(signals, [{ pid: -child.pid, signal: 'SIGTERM' }])
@@ -73,7 +73,7 @@ test('provider spawn failure closes the lease instead of orphaning the mission',
   const control = new AgentControlManager({ store: new AgentControlStore(dir) })
   const missions = new MissionStore(path.join(dir, 'missions.json'))
   const mission = missions.create({ title: 'Spawn failure', objective: 'Keep failed launches visible.', tasks: [{ id: 'task', title: 'Unavailable agent' }] })
-  const manager = new RuntimeManager({ agentControl: control, missions, memoryBridge: { recall: async () => '' }, spawnImpl: async () => { throw new Error('spawn ENOENT') } })
+  const manager = new RuntimeManager({ agentControl: control, missions, memoryBridge: { recall: async () => '' }, spawnImpl: async () => { throw new Error('spawn ENOENT') }, executablePathImpl: () => true })
   await assert.rejects(() => manager.start({ missionId: mission.id, taskId: 'task', runtime: 'codex', role: 'builder', cwd: dir, worktree: dir, task: 'fail' }), /spawn ENOENT/)
   assert.equal(control.snapshot().runs[0].status, 'blocked')
   assert.equal(missions.get(mission.id).tasks[0].status, 'failed')

@@ -70,7 +70,11 @@ test('claude-mem probe records a reachable local endpoint without exposing respo
 
 test('bridge sync invokes the fixed review-first exporter with a bounded environment', async () => {
   let invocation
-  const bridge = new MemoryBridge({ memUrl: 'http://127.0.0.1:37701', execFileImpl: async (...args) => {
+  const bridgeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-memory-bridge-'))
+  fs.mkdirSync(path.join(bridgeRoot, 'scripts'), { recursive: true })
+  fs.writeFileSync(path.join(bridgeRoot, 'config.json'), '{}')
+  fs.writeFileSync(path.join(bridgeRoot, 'scripts', 'sync-and-export.mjs'), '')
+  const bridge = new MemoryBridge({ bridgeRoot, memUrl: 'http://127.0.0.1:37701', execFileImpl: async (...args) => {
     invocation = args
     return { stdout: JSON.stringify({ ok: true, heartbeat: true, sync: { newItems: 3, fetched: 8 }, ledger: { counts: { pending: 12 } }, reviewQueue: { pending: 12 }, statusPath: '/vault/status.md' }) }
   } })
@@ -80,6 +84,9 @@ test('bridge sync invokes the fixed review-first exporter with a bounded environ
   assert.equal(result.newItems, 3)
   assert.equal(result.pending, 12)
   assert.match(invocation[0], /node$/)
-  assert.match(invocation[1][0], /agent-memory-bridge\/scripts\/sync-and-export\.mjs$/)
+  assert.equal(invocation[1][0], path.join(bridgeRoot, 'scripts', 'sync-and-export.mjs'))
+  assert.equal(invocation[1][1], '--config')
+  assert.equal(invocation[1][2], path.join(bridgeRoot, 'config.json'))
+  assert.equal(invocation[2].cwd, bridgeRoot)
   assert.deepEqual(invocation[2].env, { HOME: os.homedir(), PATH: process.env.PATH || '/usr/bin:/bin:/opt/homebrew/bin' })
 })
