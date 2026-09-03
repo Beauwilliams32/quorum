@@ -8,14 +8,19 @@ const HOME = os.homedir()
 const CLAUDE = path.join(HOME, 'CLAUDE')
 
 test('resolveProjectId maps portal cwd', () => {
-  assert.equal(resolveProjectId(path.join(CLAUDE, 'williams-media-portal')), 'portal')
-  assert.equal(resolveProjectId(path.join(CLAUDE, 'williams-media-portal', 'src')), 'portal')
+  const catalog = [{ id: 'portal', pathPrefix: path.join(CLAUDE, 'williams-media-portal') }]
+  assert.equal(resolveProjectId(path.join(CLAUDE, 'williams-media-portal'), catalog), 'portal')
+  assert.equal(resolveProjectId(path.join(CLAUDE, 'williams-media-portal', 'src'), catalog), 'portal')
 })
 
 test('resolveProjectId prefers tools-mac over trident-tools', () => {
-  assert.equal(resolveProjectId(path.join(CLAUDE, 'trident-tools')), 'trident-tools')
-  assert.equal(resolveProjectId(path.join(CLAUDE, 'trident-tools', 'apps', 'mac')), 'trident-tools-mac')
-  assert.equal(resolveProjectId(path.join(CLAUDE, 'trident-tools', 'apps', 'mac', 'src')), 'trident-tools-mac')
+  const catalog = [
+    { id: 'trident-tools', pathPrefix: path.join(CLAUDE, 'trident-tools') },
+    { id: 'trident-tools-mac', pathPrefix: path.join(CLAUDE, 'trident-tools', 'apps', 'mac') },
+  ]
+  assert.equal(resolveProjectId(path.join(CLAUDE, 'trident-tools'), catalog), 'trident-tools')
+  assert.equal(resolveProjectId(path.join(CLAUDE, 'trident-tools', 'apps', 'mac'), catalog), 'trident-tools-mac')
+  assert.equal(resolveProjectId(path.join(CLAUDE, 'trident-tools', 'apps', 'mac', 'src'), catalog), 'trident-tools-mac')
 })
 
 test('resolveProjectId returns null for unrelated paths', () => {
@@ -51,9 +56,9 @@ test('buildOffice seats sessions into rooms', () => {
   assert.ok(office.catalog.some(c => c.id === 'demo'))
 })
 
-test('PROJECT_CATALOG has expected core ids', () => {
-  const ids = new Set(PROJECT_CATALOG.map(p => p.id))
-  for (const id of ['portal', 'nil', 'ops', 'trident-tools', 'trident-tools-mac', 'uao']) {
-    assert.ok(ids.has(id), `missing ${id}`)
-  }
+test('PROJECT_CATALOG is valid on a fresh machine', () => {
+  const ids = PROJECT_CATALOG.map(p => p.id)
+  assert.ok(ids.includes('home'))
+  assert.equal(new Set(ids).size, ids.length)
+  assert.ok(PROJECT_CATALOG.every(project => project.pathPrefix && project.label))
 })

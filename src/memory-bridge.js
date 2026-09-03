@@ -20,8 +20,8 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null }
 }
 
-function bridgeConfig() {
-  const config = readJson(path.join(BRIDGE_ROOT, 'config.json')) || {}
+function bridgeConfig(bridgeRoot = BRIDGE_ROOT) {
+  const config = readJson(path.join(bridgeRoot, 'config.json')) || {}
   const url = String(process.env.QUORUM_CLAUDE_MEM_URL || config.memBaseUrl || '').trim()
   const local = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(url)
   return { url: local ? url.replace(/\/$/, '') : '', vault: path.resolve(String(process.env.QUORUM_VAULT_PATH || config.vaultPath || DEFAULT_VAULT)) }
@@ -74,8 +74,9 @@ function upsertTaskSection(existing, section, taskId) {
 }
 
 export class MemoryBridge {
-  constructor({ fetchImpl = globalThis.fetch, vault = null, memUrl = null, now = () => new Date(), execFileImpl = execFile } = {}) {
-    const config = bridgeConfig()
+  constructor({ fetchImpl = globalThis.fetch, vault = null, memUrl = null, bridgeRoot = null, now = () => new Date(), execFileImpl = execFile } = {}) {
+    this.bridgeRoot = path.resolve(bridgeRoot || process.env.QUORUM_MEMORY_BRIDGE_ROOT || BRIDGE_ROOT)
+    const config = bridgeConfig(this.bridgeRoot)
     this.fetchImpl = fetchImpl
     this.vault = path.resolve(vault || config.vault)
     const candidateUrl = memUrl === null ? config.url : String(memUrl || '')
@@ -149,12 +150,12 @@ export class MemoryBridge {
 
   async sync({ timeoutMs = SYNC_TIMEOUT_MS } = {}) {
     if (!this.memUrl) return { ok: false, state: 'offline', error: 'claude-mem is not configured' }
-    const script = path.join(BRIDGE_ROOT, 'scripts', 'sync-and-export.mjs')
-    const config = path.join(BRIDGE_ROOT, 'config.json')
+    const script = path.join(this.bridgeRoot, 'scripts', 'sync-and-export.mjs')
+    const config = path.join(this.bridgeRoot, 'config.json')
     if (!fs.existsSync(script) || !fs.existsSync(config)) return { ok: false, state: 'offline', error: 'agent-memory-bridge sync files are unavailable' }
     try {
       const { stdout } = await this.execFileImpl(process.execPath, [script, '--config', config], {
-        cwd: BRIDGE_ROOT,
+        cwd: this.bridgeRoot,
         env: { HOME, PATH: process.env.PATH || '/usr/bin:/bin:/opt/homebrew/bin' },
         timeout: timeoutMs,
         maxBuffer: 1_000_000,

@@ -7,12 +7,13 @@ const id = prefix => `${prefix}-${Date.now().toString(36)}-${crypto.randomBytes(
 const clean = value => redactRuntimeText(value).slice(0, 1_200)
 
 export class RuntimeManager {
-  constructor({ agentControl, missions, memoryBridge, state = null, spawnImpl = null, processKillImpl = process.kill.bind(process), now = () => Date.now(), heartbeatMs = null, maxConcurrentCloudAgents = 4 } = {}) {
+  constructor({ agentControl, missions, memoryBridge, state = null, spawnImpl = null, executablePathImpl = executablePath, processKillImpl = process.kill.bind(process), now = () => Date.now(), heartbeatMs = null, maxConcurrentCloudAgents = 4 } = {}) {
     this.agentControl = agentControl
     this.missions = missions
     this.memoryBridge = memoryBridge
     this.state = state
     this.spawnImpl = spawnImpl
+    this.executablePathImpl = executablePathImpl
     this.processKillImpl = processKillImpl
     this.now = now
     this.heartbeatMs = heartbeatMs
@@ -71,7 +72,7 @@ export class RuntimeManager {
     const prompt = [task || missionTask.description || missionTask.title, recall ? `\nRelevant long-term memory (bounded index/context):\n${recall}` : ''].filter(Boolean).join('\n')
     const providerModel = String(modelRef || '').startsWith(`${runtime}:`) ? String(modelRef).slice(runtime.length + 1) : String(modelRef || '')
     const plan = buildTaskLaunch({ runtime, role, cwd: root, task: prompt, model: providerModel === 'auto' ? '' : providerModel, structured: true })
-    if (!executablePath(plan.command, plan.env) && plan.command === runtime) {
+    if (!this.executablePathImpl(plan.command, plan.env) && plan.command === runtime) {
       this.agentControl.cancel(run.runId, { nextOwnerAction: `install or expose ${runtime} in Quorum PATH` })
       throw new Error(`${runtime} executable is not available`) 
     }
