@@ -3,6 +3,10 @@ node_modules/
 *.log
 .claude/
 .DS_Store
+# Local visual-acceptance evidence; retain on disk, do not release as source.
+.playwright-mcp/
+Quorum Design System.zip
+quorum-style-*.png
 /target/
 /.operator-data/
 dist/

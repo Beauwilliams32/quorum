@@ -5,10 +5,12 @@ import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const css = fs.readFileSync(path.join(root, 'public/style.css'), 'utf8');
+const designSystem = fs.readFileSync(path.join(root, 'public/design-system.css'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'public/app.js'), 'utf8');
+const allCss = `${designSystem}\n${css}`;
 
-const definedTokens = new Set([...css.matchAll(/--([a-z0-9-]+)\s*:/gi)].map(m => m[1]));
-const usedTokens = new Set([...css.matchAll(/var\(--([a-z0-9-]+)/gi)].map(m => m[1]));
+const definedTokens = new Set([...allCss.matchAll(/--([a-z0-9-]+)\s*:/gi)].map(m => m[1]));
+const usedTokens = new Set([...allCss.matchAll(/var\(--([a-z0-9-]+)/gi)].map(m => m[1]));
 
 test('professional theme defines every CSS token it uses', () => {
   const missing = [...usedTokens].filter(token => !definedTokens.has(token));

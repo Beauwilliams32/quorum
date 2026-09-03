@@ -58,9 +58,9 @@ export function resolveClaudeCommand(envPath = process.env.PATH || '', home = HO
   return null
 }
 
-async function getJson(url) {
+async function getJson(url, fetchImpl = fetch) {
   try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(1800) })
+    const r = await fetchImpl(url, { signal: AbortSignal.timeout(1800) })
     if (!r.ok) return null
     return await r.json()
   } catch { return null }
@@ -71,30 +71,35 @@ async function probeHermes() {
   return { up: !!h, port: 8644, detail: h }
 }
 
-async function probeComfy() {
-  const stats = await getJson('http://127.0.0.1:8188/system_stats')
-  if (!stats) return { up: false, port: 8188 }
-  const q = await getJson('http://127.0.0.1:8188/queue')
-  const dev = stats.devices?.[0]
-  return {
-    up: true,
-    port: 8188,
-    running: q?.queue_running?.length || 0,
-    pending: q?.queue_pending?.length || 0,
-    device: dev?.name?.slice(0, 40) || null,
-    vramFreeGB: dev?.vram_free ? +(dev.vram_free / 1e9).toFixed(1) : null,
+// The current managed WMH engine runs on :8199; :8188 remains a compatibility
+// fallback for legacy direct ComfyUI launches. Probe only one reachable engine.
+export async function probeComfy(fetchImpl = fetch, ports = [8199, 8188]) {
+  for (const port of ports) {
+    const stats = await getJson(`http://127.0.0.1:${port}/system_stats`, fetchImpl)
+    if (!stats) continue
+    const q = await getJson(`http://127.0.0.1:${port}/queue`, fetchImpl)
+    const dev = stats.devices?.[0]
+    return {
+      up: true,
+      port,
+      running: q?.queue_running?.length || 0,
+      pending: q?.queue_pending?.length || 0,
+      device: dev?.name?.slice(0, 40) || null,
+      vramFreeGB: dev?.vram_free ? +(dev.vram_free / 1e9).toFixed(1) : null,
+    }
   }
+  return { up: false, port: ports[0] || 8199 }
 }
 
 async function probeOpenClaw() {
   const candidates = [18789, 18790]
   for (const port of candidates) {
     const health = await getJson(`http://127.0.0.1:${port}/health`)
-    if (health) return { up: true, port, detail: { status: health.status || 'reachable' } }
+    if (health) return { up: true, port, connectionState: 'reachable', authState: 'required', detail: { status: health.status || 'reachable' } }
     const root = await getJson(`http://127.0.0.1:${port}/`)
-    if (root) return { up: true, port, detail: { status: 'reachable' } }
+    if (root) return { up: true, port, connectionState: 'reachable', authState: 'required', detail: { status: 'reachable' } }
   }
-  return { up: false, port: 18789 }
+  return { up: false, port: 18789, connectionState: 'offline', authState: 'unknown' }
 }
 
 // This is intentionally a boolean only. The key stays in the process
@@ -150,7 +155,7 @@ export function startServices(state) {
     if (last.hermes !== undefined && last.hermes !== hermes.up)
       state.event({ kind: hermes.up ? 'up' : 'down', text: `hermes gateway ${hermes.up ? 'UP' : 'DOWN'} :8644` })
     if (last.comfy !== undefined && last.comfy !== comfy.up)
-      state.event({ kind: comfy.up ? 'up' : 'down', text: `comfyui engine ${comfy.up ? 'UP' : 'DOWN'} :8188` })
+      state.event({ kind: comfy.up ? 'up' : 'down', text: `comfyui engine ${comfy.up ? 'UP' : 'DOWN'} :${comfy.port}` })
     if (last.openclaw !== undefined && last.openclaw !== openclaw.up)
       state.event({ kind: openclaw.up ? 'up' : 'down', text: `openclaw gateway ${openclaw.up ? 'UP' : 'DOWN'} :${openclaw.port}` })
     last = { hermes: hermes.up, comfy: comfy.up, openclaw: openclaw.up }

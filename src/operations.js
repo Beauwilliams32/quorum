@@ -46,7 +46,7 @@ export function buildOperations(stateData = {}, feed = [], ptys = [], catalog = 
     { id: 'quorum', label: 'Quorum loopback', kind: 'control plane', status: 'ready', detail: '127.0.0.1:4747' },
     { id: 'openclaw', label: 'OpenClaw Gateway', kind: 'agent gateway', status: services.openclaw?.up ? 'ready' : 'offline', detail: services.openclaw?.port ? `127.0.0.1:${services.openclaw.port}` : '18789' },
     { id: 'hermes', label: 'Hermes Gateway', kind: 'local harness', status: services.hermes?.up ? 'ready' : 'offline', detail: '127.0.0.1:8644' },
-    { id: 'comfyui', label: 'ComfyUI / Wan', kind: 'media node', status: services.comfy?.up ? 'ready' : 'offline', detail: '127.0.0.1:8188' },
+    { id: 'comfyui', label: 'ComfyUI / Wan', kind: 'media node', status: services.comfy?.up ? 'ready' : 'offline', detail: `127.0.0.1:${services.comfy?.port || 8199}` },
   ]
   const channels = [
     { id: 'roundtable', label: 'Quorum roundtable', status: 'ready', detail: 'decision records + cost preview' },

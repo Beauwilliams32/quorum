@@ -1,4 +1,5 @@
 import { sh } from '../util.js'
+import { normalizeProcess, platformCapabilities } from '../platform-control.js'
 
 // Order matters: first match wins (claude-mem must match before the generic claude rule).
 // 'exe' rules test only the executable path — a `git` process with ~/.claude in its
@@ -43,17 +44,17 @@ export function startProcesses(state) {
   let first = true
 
   const tick = async () => {
-    const out = await sh('/bin/ps', ['-axo', 'pid=,ppid=,pcpu=,rss=,etime=,command='])
+    const out = await sh('/bin/ps', ['-axo', 'pid=,ppid=,uid=,pcpu=,rss=,etime=,command='])
     if (!out) return
     const procs = []
     const all = []
     for (const line of out.split('\n')) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(.+)$/)
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(.+)$/)
       if (!m) continue
       const p = {
-        pid: +m[1], ppid: +m[2], cpu: +m[3],
-        rssMB: +(m[4] / 1024).toFixed(1),
-        etime: m[5], cmd: m[6].slice(0, 220),
+        pid: +m[1], ppid: +m[2], uid: +m[3], cpu: +m[4],
+        rssMB: +(m[5] / 1024).toFixed(1),
+        etime: m[6], cmd: m[7].slice(0, 220),
       }
       all.push(p)
       const exe = p.cmd.split(' ')[0]
@@ -82,7 +83,8 @@ export function startProcesses(state) {
     const topRss = [...all].sort((a, b) => b.rssMB - a.rssMB).slice(0, 8)
       .map(p => ({ pid: p.pid, rssMB: p.rssMB, cpu: p.cpu, name: p.name || shortName(p.cmd), group: p.group || null }))
 
-    state.update('processes', { procs, groups, topRss })
+    const inventory = all.map(proc => normalizeProcess(proc)).slice(0, 1200)
+    state.update('processes', { schemaVersion: 1, procs, groups, topRss, inventory, capabilities: platformCapabilities() }, { schemaVersion: 1, procs, groups, topRss, inventoryCount: inventory.length, capabilities: platformCapabilities() })
   }
 
   tick()

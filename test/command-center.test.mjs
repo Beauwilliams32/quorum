@@ -60,6 +60,16 @@ test('task-pack previews carry role, route, and no inherited environment', () =>
   assert.match(preview.launch.shellCommand, /Review the auth boundary/)
 })
 
+test('managed task previews show the structured command that confirmation executes', () => {
+  const packCatalog = buildCatalog({
+    config: { path: '/tmp/config.json', exists: true, projects: [], runtimes: [], models: [] },
+    runtimes: [{ id: 'codex', label: 'Codex', command: 'codex', builtin: true }],
+    models: [],
+  })
+  const preview = previewAction({ action: 'launch', managed: true, packId: 'review', runtimeId: 'codex', roomId: 'room', task: 'Review the auth boundary' }, packCatalog, state, ptys)
+  assert.equal(preview.launch.args.at(-1), '--json')
+})
+
 test('configuration validation keeps command settings allowlisted', () => {
   const result = validateConfig({ roots: ['~/code'], modelMappings: { claude: 'claude-sonnet' }, pets: { claude: 'local.svg' }, display: { theme: 'dark', refreshSeconds: 10 }, secret: 'drop-me' })
   assert.equal(result.ok, true)

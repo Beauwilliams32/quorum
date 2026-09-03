@@ -13,10 +13,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = 4700 + Math.floor(Math.random() * 90)
 const base = `http://127.0.0.1:${PORT}`
 const controlStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-route-state-'))
+const missionStateFile = path.join(controlStateDir, 'missions.json')
 
 let child
 test.before(async () => {
-  child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(PORT), AGENT_CONTROL_STATE_DIR: controlStateDir }, stdio: ['ignore', 'pipe', 'pipe'] })
+  child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(PORT), AGENT_CONTROL_STATE_DIR: controlStateDir, QUORUM_MISSIONS_PATH: missionStateFile }, stdio: ['ignore', 'pipe', 'pipe'] })
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('server did not start')), 15000)
     child.stdout.on('data', d => { if (String(d).includes(`:${PORT}`)) { clearTimeout(t); resolve() } })
@@ -64,6 +65,75 @@ test('GET /api/operations exposes a bounded operator projection', async () => {
   assert.ok(Array.isArray(operations.nodes))
   assert.ok(Array.isArray(operations.channels))
   assert.equal(JSON.stringify(operations).includes('prompt'), false)
+})
+
+test('registry, workspace, task, and memory API surfaces are bounded and truthful', async () => {
+  const [agents, workspaces, tasks, tools, mcp, memory] = await Promise.all([
+    fetch(`${base}/api/agents`),
+    fetch(`${base}/api/workspaces`),
+    fetch(`${base}/api/tasks`),
+    fetch(`${base}/api/tools`),
+    fetch(`${base}/api/mcp`),
+    fetch(`${base}/api/memory?q=agent&limit=2`),
+  ])
+  assert.equal(agents.status, 200)
+  assert.equal(workspaces.status, 200)
+  assert.equal(tasks.status, 200)
+  assert.equal(tools.status, 200)
+  assert.equal(mcp.status, 200)
+  assert.equal(memory.status, 200)
+  assert.ok(Array.isArray((await workspaces.json()).workspaces))
+  assert.ok(Array.isArray((await tasks.json()).tasks))
+  const toolPayload = await tools.json()
+  assert.ok(toolPayload.tools.some(tool => tool.id === 'terminal' && tool.approval === 'explicit'))
+  assert.equal(JSON.stringify(toolPayload).includes('credential'), false)
+  assert.ok(Array.isArray((await mcp.json()).servers))
+  assert.ok(Array.isArray((await memory.json()).results))
+})
+
+test('runtime and memory bridge endpoints expose local integration state', async () => {
+  const [runtime, memory] = await Promise.all([fetch(`${base}/api/runtime-runs`), fetch(`${base}/api/memory/status`)])
+  assert.equal(runtime.status, 200)
+  assert.equal(memory.status, 200)
+  const runtimeBody = await runtime.json()
+  const memoryBody = await memory.json()
+  assert.ok(Array.isArray(runtimeBody.runs))
+  assert.equal(memoryBody.claudeMem.loopbackOnly, true)
+  assert.equal(memoryBody.obsidian.writeScope, '09_AI_AGENTS/Quorum/Missions')
+  assert.ok(['ready', 'reachable', 'offline', 'unknown'].includes(memoryBody.claudeMem.state))
+})
+
+test('memory recall and sync routes return bounded integration evidence', async () => {
+  const recall = await fetch(`${base}/api/memory/recall?q=operator&limit=2`)
+  assert.equal(recall.status, 200)
+  const recallBody = await recall.json()
+  assert.equal(typeof recallBody.context, 'string')
+  assert.equal(recallBody.query, 'operator')
+  assert.ok(recallBody.bridge.claudeMem.loopbackOnly)
+
+  const sync = await fetch(`${base}/api/memory/sync`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+  assert.equal(sync.status, 200)
+  const syncBody = await sync.json()
+  assert.ok(typeof syncBody.syncedAt === 'string')
+  assert.ok(typeof syncBody.artifacts.stats.total === 'number')
+})
+
+test('artifact open actions reject foreign origins before touching the filesystem', async () => {
+  const denied = await fetch(`${base}/api/artifacts/000000000000000000000000/open`, { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, body: '{}' })
+  assert.equal(denied.status, 403)
+})
+
+test('mission API persists an objective and cancellation closes queued work', async () => {
+  const created = await fetch(`${base}/api/missions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Route mission', objective: 'Verify durable API state', tasks: [{ id: 't1', title: 'Wait', description: 'Remain queued' }] }) })
+  assert.equal(created.status, 201)
+  const mission = (await created.json()).mission
+  assert.equal(mission.status, 'planning')
+  const cancelled = await fetch(`${base}/api/missions/${mission.id}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+  assert.equal(cancelled.status, 200)
+  const result = (await cancelled.json()).mission
+  assert.equal(result.status, 'cancelled')
+  assert.equal(result.tasks[0].status, 'cancelled')
+  assert.equal((await fetch(`${base}/api/missions/${mission.id}`)).status, 200)
 })
 
 test('agent-control routes create, heartbeat, checkpoint, approve and close redacted runs', async () => {
@@ -119,6 +189,7 @@ test('websocket handshake sends cast, edition, runtimes and models, and rejects 
   const types = msgs.map(m => m.type)
   assert.deepEqual(types.slice(0, 4), ['snapshot', 'pty.list', 'cast', 'rt.list'])
   const cast = msgs[2]
+  assert.ok(Array.isArray(msgs[0].data.runtimeRuns?.runs))
   assert.ok(cast.cast.length >= 3)
   assert.equal(cast.cast.some(c => 'prompt' in c), false)
   assert.ok(['free', 'pro'].includes(cast.edition.tier))

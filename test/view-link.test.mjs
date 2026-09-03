@@ -20,3 +20,8 @@ test('requested view is applied before websocket snapshot data arrives', () => {
     'first-visit tour does not override linked non-office views'
   );
 });
+
+test('managed runtime state is hydrated and repaints the operational surfaces', () => {
+  assert.ok(app.includes('S.runtimeRuns = m.data.runtimeRuns || null'), 'snapshot carries managed runtime state');
+  assert.ok(app.includes("if (m.key === 'runtimeRuns') { renderMissions(); renderTopbar() }"), 'runtime updates repaint missions and topbar');
+});

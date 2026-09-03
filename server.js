@@ -14,6 +14,8 @@ import { startTasks } from './src/collectors/tasks.js'
 import { startComposio } from './src/collectors/composio.js'
 import { startAgents } from './src/collectors/agents.js'
 import { startMemory } from './src/collectors/memory.js'
+import { startArtifacts, reindexArtifacts, searchArtifacts, readArtifact, openArtifact, openDirectory } from './src/artifacts.js'
+import { MissionStore, publicMission } from './src/missions.js'
 import { stampPresence } from './src/presence.js'
 import { PtyManager } from './src/pty.js'
 import { withinDir, isAllowedOrigin } from './src/util.js'
@@ -29,6 +31,14 @@ import { buildOperations } from './src/operations.js'
 import { AgentControlManager } from './src/agent-control/manager.js'
 import { publicAgentPacks, resolveAgentPack } from './src/agents/packs.js'
 import { runDoctor } from './src/agent-control/doctor.js'
+import { buildMcpRegistry, buildTaskRegistry, buildToolRegistry, buildWorkspaceRegistry } from './src/registry.js'
+import { MemoryBridge } from './src/memory-bridge.js'
+import { RuntimeManager } from './src/runtime-manager.js'
+import { listServices, platformCapabilities, ProcessController } from './src/platform-control.js'
+import { StandingJobScheduler } from './src/standing-jobs.js'
+import { buildCityState } from './src/city-state.js'
+import { OpenClawBridge } from './src/openclaw-bridge.js'
+import { repurposeVideo as runPipelineRepurpose, verifyVideo as runPipelineVerify, generateVariants as runPipelineVariants, fetchAsset as runPipelineAsset, newJobId } from './scripts/pipeline/pipeline.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const portIndex = process.argv.indexOf('--port')
@@ -42,16 +52,26 @@ const VENDOR = {
   '/vendor/xterm.js': 'node_modules/@xterm/xterm/lib/xterm.js',
   '/vendor/xterm.css': 'node_modules/@xterm/xterm/css/xterm.css',
   '/vendor/addon-fit.js': 'node_modules/@xterm/addon-fit/lib/addon-fit.js',
+  '/vendor/three.module.js': 'node_modules/three/build/three.module.js',
+  '/vendor/three.core.js': 'node_modules/three/build/three.core.js',
 }
 const MIME = {
   '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
-  '.svg': 'image/svg+xml', '.json': 'application/json', '.map': 'application/json',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp', '.json': 'application/json', '.map': 'application/json',
 }
 
 const state = new State()
 const ptys = new PtyManager(state)
 const roundtables = new RoundtableRegistry(state)
 const agentControl = new AgentControlManager()
+const missions = new MissionStore()
+const memoryBridge = new MemoryBridge()
+const runtimeManager = new RuntimeManager({ agentControl, missions, memoryBridge, state })
+const processController = new ProcessController({ resolveProcess: pid => (state.data.processes?.inventory || []).find(item => item.pid === Number(pid)) || null })
+const standingJobs = new StandingJobScheduler()
+const pipelineJobs = new Map()
+const PIPELINE_JOB_LIMIT = 50
+let platformServices = []
 roundtables.loadArchive()
 const supervisedRuns = new Map()
 
@@ -73,6 +93,39 @@ async function readJson(req) {
 
 function refreshAgentControl() { state.update('agentControl', agentControl.snapshot()) }
 refreshAgentControl()
+
+function refreshMissions() {
+  state.update('missions', { missions: missions.list().map(publicMission), ts: Date.now() })
+}
+refreshMissions()
+state.update('runtimeRuns', { runs: runtimeManager.snapshot(), ts: Date.now() })
+state.update('memoryBridge', memoryBridge.status())
+state.update('standingJobs', standingJobs.snapshot())
+
+function refreshCity() { state.update('city', buildCityState(state.data, standingJobs.snapshot(), platformServices)) }
+async function refreshPlatformServices() { platformServices = await listServices(); state.update('platformServices', { schemaVersion: 1, services: platformServices, capabilities: platformCapabilities(), ts: Date.now() }); refreshCity() }
+const openclawBridge = new OpenClawBridge({
+  onUpdate: snapshot => { state.update('openclaw', snapshot); refreshCity() },
+  onEvent: event => state.event({ kind: 'openclaw', text: event.summary }),
+})
+state.update('openclaw', openclawBridge.snapshot())
+void openclawBridge.start()
+standingJobs.register('runtime-health', async () => ({ attention: !(state.data.services?.claude?.up || state.data.processes?.groups?.codex), detail: 'runtime inventory checked' }))
+standingJobs.register('daemon-health', async () => ({ attention: platformServices.some(item => item.state === 'error'), detail: `${platformServices.length} services observed` }))
+standingJobs.register('memory-maintenance', async () => ({ attention: !state.data.memory?.ok, detail: state.data.memory?.ok ? 'memory index healthy' : 'memory index needs attention' }))
+standingJobs.register('failed-run-recovery', async () => { const recovered = agentControl.recover({ now: Date.now() }); if (recovered.length) refreshAgentControl(); return { attention: recovered.length > 0, detail: recovered.length ? `${recovered.length} recovery lease created` : 'no stale runs' } })
+standingJobs.start(snapshot => { state.update('standingJobs', snapshot); refreshCity() })
+void refreshPlatformServices()
+setInterval(() => { void refreshPlatformServices() }, 30_000).unref?.()
+
+async function refreshMemoryBridge() {
+  const status = await memoryBridge.probe()
+  state.update('memoryBridge', status)
+  return status
+}
+
+void refreshMemoryBridge()
+setInterval(() => { void refreshMemoryBridge() }, 15_000)
 
 function emitAgentEvent(type, run) {
   state.broadcast({ type, run: { id: run.runId, status: run.status, phase: run.phase, heartbeatAt: run.heartbeatAt, leaseExpiresAt: run.leaseExpiresAt, packId: run.packId, runtime: run.runtime } })
@@ -115,11 +168,220 @@ const server = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json')
     return res.end(JSON.stringify({ ...state.data, feed: state.feed, roundtables: roundtables.list() }, null, 1))
   }
+  if (u.pathname === '/api/openclaw/status' && req.method === 'GET') return sendJson(res, 200, openclawBridge.status())
+  if (u.pathname === '/api/openclaw/snapshot' && req.method === 'GET') return sendJson(res, 200, openclawBridge.snapshot())
+  if (u.pathname === '/api/openclaw/events' && req.method === 'GET') return sendJson(res, 200, { schemaVersion: 1, events: openclawBridge.snapshot().projection.events, ts: Date.now() })
+  if (u.pathname === '/api/openclaw/connect' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    openclawBridge.connect()
+    return sendJson(res, 202, { status: openclawBridge.status() })
+  }
+  if (u.pathname === '/api/openclaw/actions/preview' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => sendJson(res, 201, { preview: openclawBridge.previewAction(input) })).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/openclaw/actions/confirm' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => openclawBridge.confirmAction(input.previewId)).then(action => sendJson(res, 200, { action })).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
   if (u.pathname === '/api/catalog') {
     res.setHeader('content-type', 'application/json')
     res.setHeader('cache-control', 'no-store')
     const catalog = buildCatalog()
     return res.end(JSON.stringify({ ...publicCatalog(catalog), agentPacks: publicAgentPacks({ runtimes: loadRuntimes(), modelOptions: roundtableModelOptions({ catalog }) }) }))
+  }
+  if (u.pathname === '/api/agents' && req.method === 'GET') {
+    return sendJson(res, 200, state.data.agents || { agents: [], ts: Date.now() })
+  }
+  if (u.pathname === '/api/workspaces' && req.method === 'GET') {
+    return sendJson(res, 200, { workspaces: buildWorkspaceRegistry(state.data, missions.list().map(publicMission)), ts: Date.now() })
+  }
+  if (u.pathname === '/api/tasks' && req.method === 'GET') {
+    return sendJson(res, 200, { tasks: buildTaskRegistry(missions.list().map(publicMission)), ts: Date.now() })
+  }
+  if (u.pathname === '/api/tools' && req.method === 'GET') {
+    return sendJson(res, 200, { tools: buildToolRegistry(state.data, buildCatalog()), ts: Date.now() })
+  }
+  if (u.pathname === '/api/mcp' && req.method === 'GET') {
+    return sendJson(res, 200, { servers: buildMcpRegistry(state.data), ts: Date.now() })
+  }
+  if (u.pathname === '/api/platform' && req.method === 'GET') return sendJson(res, 200, { schemaVersion: 1, capabilities: platformCapabilities(), services: platformServices, ts: Date.now() })
+  if (u.pathname === '/api/processes' && req.method === 'GET') return sendJson(res, 200, { schemaVersion: 1, processes: state.data.processes?.inventory || [], capabilities: state.data.processes?.capabilities || platformCapabilities(), control: processController.snapshot(), ts: Date.now() })
+  if (u.pathname === '/api/city' && req.method === 'GET') return sendJson(res, 200, buildCityState(state.data, standingJobs.snapshot(), platformServices))
+  if (u.pathname === '/api/standing-jobs' && req.method === 'GET') return sendJson(res, 200, standingJobs.snapshot())
+  const standingJobRoute = u.pathname.match(/^\/api\/standing-jobs\/([^/]+)\/(run|suspend|resume)$/)
+  if (standingJobRoute && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    const [jobId, action] = standingJobRoute.slice(1)
+    Promise.resolve(action === 'run' ? standingJobs.run(jobId, snapshot => state.update('standingJobs', snapshot)) : standingJobs.suspend(jobId, action === 'suspend')).then(job => { state.update('standingJobs', standingJobs.snapshot()); refreshCity(); sendJson(res, 200, { job, scheduler: standingJobs.snapshot() }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/process-actions/preview' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => { const proc = (state.data.processes?.inventory || []).find(item => item.id === input.processId || item.pid === Number(input.pid)); return sendJson(res, 201, { preview: processController.preview(input, proc) }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/process-actions/confirm' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => { const action = processController.confirm(input.previewId); state.event({ kind: 'process-control', text: `${action.signal} → ${action.target.name} (${action.target.pid})` }); return sendJson(res, 200, { action }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/artifacts/search' && req.method === 'GET') {
+    return sendJson(res, 200, searchArtifacts(u.searchParams.get('q') || '', { source: u.searchParams.get('source') || '', limit: u.searchParams.get('limit') || 40 }))
+  }
+  if (u.pathname === '/api/memory' && req.method === 'GET') {
+    return sendJson(res, 200, searchArtifacts(u.searchParams.get('q') || '', { source: u.searchParams.get('source') || '', limit: u.searchParams.get('limit') || 40 }))
+  }
+  if (u.pathname === '/api/memory/status' && req.method === 'GET') {
+    refreshMemoryBridge().then(status => sendJson(res, 200, status)).catch(error => sendJson(res, 500, { error: String(error.message || error), ...memoryBridge.status() }))
+    return
+  }
+  if (u.pathname === '/api/memory/recall' && req.method === 'GET') {
+    const query = u.searchParams.get('q') || ''
+    memoryBridge.recall(query, { limit: u.searchParams.get('limit') || 8 }).then(context => sendJson(res, 200, { query: query.slice(0, 200), context, bridge: memoryBridge.status(), ts: Date.now() })).catch(error => sendJson(res, 500, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/memory/sync' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    Promise.all([reindexArtifacts(), refreshMemoryBridge()]).then(async ([artifacts, bridgeBeforeSync]) => {
+      const sync = bridgeBeforeSync.claudeMem.reachable
+        ? await memoryBridge.sync()
+        : { ok: false, state: bridgeBeforeSync.claudeMem.state, error: 'claude-mem endpoint is not reachable' }
+      const bridge = await refreshMemoryBridge()
+      const bridgeLabel = sync.ok ? `bridge +${sync.newItems} new` : `bridge ${bridge.claudeMem.state}`
+      state.event({ kind: 'memory', text: `memory sync → ${artifacts.stats.total} indexed artifacts · ${bridgeLabel}` })
+      return sendJson(res, 200, { artifacts, bridge, sync, syncedAt: new Date().toISOString() })
+    }).catch(error => sendJson(res, 500, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/artifacts/reindex' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    reindexArtifacts().then(result => sendJson(res, 200, result)).catch(error => sendJson(res, 500, { error: String(error.message || error) }))
+    return
+  }
+  const artifactRoute = u.pathname.match(/^\/api\/artifacts\/([a-f0-9]{24})$/)
+  if (artifactRoute && req.method === 'GET') {
+    try { return sendJson(res, 200, readArtifact(artifactRoute[1])) } catch (error) { return sendJson(res, 404, { error: String(error.message || error) }) }
+  }
+  const artifactOpenRoute = u.pathname.match(/^\/api\/artifacts\/([a-f0-9]{24})\/(open|reveal)$/)
+  if (artifactOpenRoute && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    try { return sendJson(res, 200, openArtifact(artifactOpenRoute[1], artifactOpenRoute[2] === 'reveal' ? 'reveal' : 'default')) } catch (error) { return sendJson(res, 400, { error: String(error.message || error) }) }
+  }
+  const projectOpenRoute = u.pathname.match(/^\/api\/projects\/([^/]+)\/(open|reveal)$/)
+  if (projectOpenRoute && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    let projectId
+    try { projectId = decodeURIComponent(projectOpenRoute[1]) } catch { return sendJson(res, 400, { error: 'invalid project id' }) }
+    const room = (state.data.projects?.rooms || []).find(item => item.id === projectId)
+    if (!room) return sendJson(res, 404, { error: 'unknown project' })
+    try { return sendJson(res, 200, openDirectory(room.cwd, projectOpenRoute[2] === 'reveal' ? 'reveal' : 'default', [{ id: projectId, path: room.cwd }])) } catch (error) { return sendJson(res, 400, { error: String(error.message || error) }) }
+  }
+  if (u.pathname === '/api/missions' && req.method === 'GET') {
+    return sendJson(res, 200, { missions: missions.list().map(publicMission) })
+  }
+  if (u.pathname === '/api/missions' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => {
+      const mission = missions.create(input)
+      refreshMissions(); state.event({ kind: 'mission', text: `mission created → ${mission.title}` })
+      sendJson(res, 201, { mission: publicMission(mission) })
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const missionTaskDispatch = u.pathname.match(/^\/api\/missions\/([^/]+)\/tasks\/([^/]+)\/dispatch$/)
+  if (missionTaskDispatch && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(async input => {
+      const [missionId, taskId] = missionTaskDispatch.slice(1)
+      const mission = missions.get(missionId)
+      if (!mission) throw new Error('unknown mission')
+      const task = mission.tasks.find(item => item.id === taskId)
+      if (!task) throw new Error('unknown mission task')
+      if (!missions.readyTasks(missionId).some(item => item.id === taskId) && task.status !== 'working') throw new Error('task is blocked by incomplete dependencies')
+      const room = (state.data.projects?.rooms || []).find(item => item.id === (input.roomId || task.roomId))
+      if (!room) throw new Error('unknown project room')
+      const worktree = path.resolve(String(input.worktree || task.worktree || room.cwd))
+      if (!fs.existsSync(worktree) || !fs.statSync(worktree).isDirectory()) throw new Error('worktree directory does not exist')
+      const catalog = buildCatalog()
+      const preview = previewAction({
+        action: 'launch',
+        runtimeId: input.runtimeId || task.runtimeId || 'codex',
+        roomId: input.roomId || task.roomId,
+        packId: input.packId || task.packId || 'builder',
+        modelRef: input.modelRef || task.modelRef || undefined,
+        task: input.task || task.description || task.title,
+        modelOptions: roundtableModelOptions({ catalog }),
+      }, catalog, state, ptys)
+      if (input.confirm !== true) return sendJson(res, 200, { requiresConfirmation: true, mission: publicMission(mission), task, preview })
+      if (input.managed === true) {
+        const pack = resolveAgentPack(input.packId || task.packId || preview.packId || 'builder')
+        const started = await runtimeManager.start({ missionId, taskId, runtime: input.runtimeId || task.runtimeId || 'codex', role: input.role || pack.role, cwd: room.cwd, worktree, branch: input.branch || task.branch || room.branch, task: input.task || task.description || task.title, packId: pack.id, modelRef: input.modelRef || task.modelRef || preview.modelRef })
+        refreshAgentControl(); refreshMissions()
+        return sendJson(res, 202, { ...started, mission: publicMission(missions.get(mission.id)), task: missions.get(mission.id)?.tasks.find(item => item.id === task.id), memory: memoryBridge.status() })
+      }
+      const result = executeAction(preview, { ...input, roomId: preview.roomId, confirm: true }, { state, ptys, startPty: (profile, roomId, launch) => {
+        const pack = preview.packId ? resolveAgentPack(preview.packId) : null
+        const run = pack ? agentControl.createRun({ runtime: profile, role: pack.role, packId: pack.id, modelRef: preview.modelRef, repoRoot: room.cwd, worktree, branch: input.branch || task.branch, plannedActions: pack.capabilities, requiredGates: pack.gates, parentTask: task.id }) : null
+        const rec = ptys.create(profile, worktree, 120, 30, launch?.shellCommand || null, run ? { QUORUM_AGENT_PACK: pack.id, QUORUM_AGENT_RUN_ID: run.runId, QUORUM_MISSION_ID: mission.id, QUORUM_TASK_ID: task.id } : {})
+        if (run) { superviseRun(run, rec); refreshAgentControl() }
+        rec.term.onExit(({ exitCode }) => {
+          try {
+            if (missions.get(mission.id)?.tasks.find(item => item.id === task.id)?.status === 'cancelled') return
+            missions.setTask(mission.id, task.id, { status: exitCode === 0 ? 'completed' : 'failed', ptyId: rec.id, error: exitCode === 0 ? null : `process exit ${exitCode ?? 'unknown'}` })
+            refreshMissions(); state.event({ kind: 'mission', text: `task ${task.id} ${exitCode === 0 ? 'completed' : 'failed'} → ${mission.title}` })
+          } catch { /* the process exit must never crash the cockpit */ }
+        })
+        missions.setTask(mission.id, task.id, { status: 'working', ptyId: rec.id, worktree, branch: input.branch || task.branch, startedAt: new Date().toISOString() })
+        missions.event(mission.id, 'TASK_STARTED', `${task.title} → ${profile}`)
+        refreshMissions()
+        return rec
+      } })
+      return sendJson(res, 200, { ...result, mission: publicMission(missions.get(mission.id)), task: missions.get(mission.id)?.tasks.find(item => item.id === task.id) })
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const missionRoute = u.pathname.match(/^\/api\/missions\/([^/]+)$/)
+  if (missionRoute && req.method === 'GET') {
+    const mission = missions.get(missionRoute[1])
+    return mission ? sendJson(res, 200, { mission: publicMission(mission), readyTasks: missions.readyTasks(mission.id).map(task => task.id) }) : sendJson(res, 404, { error: 'unknown mission' })
+  }
+  if (missionRoute && req.method === 'PATCH') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => { const mission = missions.update(missionRoute[1], input); refreshMissions(); sendJson(res, 200, { mission: publicMission(mission) }) }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const missionCancel = u.pathname.match(/^\/api\/missions\/([^/]+)\/(cancel|stop)$/)
+  if (missionCancel && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    try {
+      const mission = missions.update(missionCancel[1], { status: 'cancelled' })
+      runtimeManager.cancelMission(mission.id)
+      for (const task of mission.tasks) {
+        if (task.status === 'working' && task.ptyId) ptys.kill(task.ptyId)
+        if (['queued', 'ready', 'working'].includes(task.status)) missions.setTask(mission.id, task.id, { status: 'cancelled' })
+      }
+      const updated = missions.event(mission.id, 'MISSION_CANCELLED', 'cancelled by operator')
+      refreshMissions(); state.event({ kind: 'mission', text: `mission cancelled → ${updated.title}` })
+      return sendJson(res, 200, { mission: publicMission(updated) })
+    } catch (error) { return sendJson(res, 400, { error: String(error.message || error) }) }
+  }
+  if (u.pathname === '/api/runtime-runs' && req.method === 'GET') {
+    return sendJson(res, 200, { runs: runtimeManager.snapshot(), memory: memoryBridge.status(), ts: Date.now() })
+  }
+  const runtimeEvents = u.pathname.match(/^\/api\/runtime-runs\/([^/]+)\/events$/)
+  if (runtimeEvents && req.method === 'GET') return sendJson(res, 200, { runId: runtimeEvents[1], events: runtimeManager.events(runtimeEvents[1]) })
+  const runtimeAction = u.pathname.match(/^\/api\/runtime-runs\/([^/]+)\/(pause|resume|cancel)$/)
+  if (runtimeAction && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    try {
+      const [runId, action] = runtimeAction.slice(1)
+      const run = action === 'pause' ? runtimeManager.pause(runId) : action === 'resume' ? runtimeManager.resume(runId) : runtimeManager.cancel(runId)
+      refreshAgentControl(); refreshMissions()
+      return sendJson(res, 200, { run })
+    } catch (error) { return sendJson(res, 400, { error: String(error.message || error) }) }
   }
   if (u.pathname === '/api/operations') {
     res.setHeader('content-type', 'application/json')
@@ -221,6 +483,126 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({ error: String(error.message || error) }))
       }
     })
+    return
+  }
+  // Content Repurposing Pipeline — local ffmpeg jobs that turn a landscape
+  // source into vertical shorts and verify the output. Jobs run async because
+  // ffmpeg is synchronous and CPU-bound; callers poll for status.
+  const pipelineStartRoute = u.pathname === '/api/pipeline/repurpose' && req.method === 'POST'
+  if (pipelineStartRoute) {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => {
+      if (!input || typeof input !== 'object') throw new Error('expected a JSON object')
+      if (!input.input) throw new Error('input is required')
+      if (input.segments == null) throw new Error('segments is required')
+      const jobId = newJobId()
+      const job = {
+        jobId,
+        status: 'queued',
+        input: input.input,
+        segmentsCount: Array.isArray(input.segments) ? input.segments.length : null,
+        submittedAt: Date.now(),
+        events: [],
+      }
+      pipelineJobs.set(jobId, job)
+      if (pipelineJobs.size > PIPELINE_JOB_LIMIT) {
+        const oldest = [...pipelineJobs.entries()].sort((a, b) => a[1].submittedAt - b[1].submittedAt)[0]
+        if (oldest) pipelineJobs.delete(oldest[0])
+      }
+      state.event({ kind: 'pipeline', text: `pipeline repurpose queued → ${path.basename(String(input.input))} (${job.segmentsCount ?? '?'} segments)` })
+      // Fire the work without blocking the HTTP response. Failures land on the
+      // job record so a later poll surfaces them with the same shape as success.
+      runPipelineRepurpose({ input: input.input, segments: input.segments, jobId })
+        .then(result => {
+          job.status = result.allPassed ? 'completed' : 'completed_with_failures'
+          job.result = result
+          job.finishedAt = Date.now()
+          state.event({ kind: 'pipeline', text: `pipeline repurpose ${job.status} → ${result.segments} shorts` })
+        })
+        .catch(error => {
+          job.status = 'failed'
+          job.error = String(error.message || error)
+          job.finishedAt = Date.now()
+          state.event({ kind: 'pipeline', text: `pipeline repurpose failed → ${job.error}` })
+        })
+      return sendJson(res, 202, { jobId, status: job.status, submittedAt: job.submittedAt })
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const pipelineStatusRoute = u.pathname.match(/^\/api\/pipeline\/repurpose\/([^/]+)$/)
+  if (pipelineStatusRoute && req.method === 'GET') {
+    const job = pipelineJobs.get(pipelineStatusRoute[1])
+    if (!job) return sendJson(res, 404, { error: 'unknown job' })
+    return sendJson(res, 200, job)
+  }
+  const pipelineVerifyRoute = u.pathname === '/api/pipeline/verify' && req.method === 'POST'
+  if (pipelineVerifyRoute) {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(async input => {
+      if (!input || !input.path) throw new Error('path is required')
+      const result = await runPipelineVerify(input.path)
+      return sendJson(res, 200, result)
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const pipelineVariantsRoute = u.pathname === '/api/pipeline/variants' && req.method === 'POST'
+  if (pipelineVariantsRoute) {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(async input => {
+      if (!input || !input.input) throw new Error('input is required')
+      const job = { status: 'pending', submittedAt: Date.now(), input: { input: input.input, count: input.count || 25 } }
+      const jobId = newJobId()
+      pipelineJobs.set(jobId, { ...job, jobId, kind: 'variants' })
+      if (pipelineJobs.size > PIPELINE_JOB_LIMIT) {
+        const oldest = [...pipelineJobs.entries()].sort((a, b) => a[1].submittedAt - b[1].submittedAt)[0]
+        if (oldest) pipelineJobs.delete(oldest[0])
+      }
+      sendJson(res, 202, { jobId, status: 'pending' })
+      runPipelineVariants({
+        input: input.input,
+        count: input.count || 25,
+        logo: input.logo,
+        seed: input.seed,
+        jobId,
+      }).then(result => {
+        pipelineJobs.set(jobId, { ...job, jobId, status: 'complete', result, finishedAt: Date.now() })
+        state.event({ kind: 'pipeline', text: `pipeline variants complete → ${result.count} ads` })
+      }).catch(error => {
+        pipelineJobs.set(jobId, { ...job, jobId, status: 'failed', error: String(error.message || error), finishedAt: Date.now() })
+        state.event({ kind: 'pipeline', text: `pipeline variants failed → ${error.message || error}` })
+      })
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  const pipelineAssetRoute = u.pathname === '/api/pipeline/asset' && req.method === 'POST'
+  if (pipelineAssetRoute) {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(async input => {
+      if (!input || !input.topic) throw new Error('topic is required')
+      const job = { status: 'pending', submittedAt: Date.now(), input: { topic: input.topic } }
+      const jobId = newJobId()
+      pipelineJobs.set(jobId, { ...job, jobId, kind: 'asset' })
+      if (pipelineJobs.size > PIPELINE_JOB_LIMIT) {
+        const oldest = [...pipelineJobs.entries()].sort((a, b) => a[1].submittedAt - b[1].submittedAt)[0]
+        if (oldest) pipelineJobs.delete(oldest[0])
+      }
+      sendJson(res, 202, { jobId, status: 'pending' })
+      runPipelineAsset({
+        topic: input.topic,
+        duration: input.duration || 5.0,
+        aspect: input.aspect || '9:16',
+        allowCloud: !!input.allowCloud,
+        auth: input.auth,
+        budget: input.budget || 0.10,
+        jobId,
+      }).then(result => {
+        pipelineJobs.set(jobId, { ...job, jobId, status: 'complete', result, finishedAt: Date.now() })
+        state.event({ kind: 'pipeline', text: `pipeline asset resolved → ${result.result.source}` })
+      }).catch(error => {
+        pipelineJobs.set(jobId, { ...job, jobId, status: 'failed', error: String(error.message || error), finishedAt: Date.now() })
+        state.event({ kind: 'pipeline', text: `pipeline asset failed → ${error.message || error}` })
+      })
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
     return
   }
   // A debate is only worth what survives it, so every table is exportable as a
@@ -474,6 +856,7 @@ startTasks(state)
 startComposio(state)
 startAgents(state)
 startMemory(state)
+startArtifacts(state)
 
 // The edition is resolved before the socket opens: a client that connected
 // mid-load would cache a free cast for the life of the page and a paying user

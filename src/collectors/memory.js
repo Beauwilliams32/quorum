@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { sourceOfTruthStatus } from '../source-of-truth.js'
 
 const HOME = os.homedir()
 export const DEFAULT_BRIDGE_ROOT = path.join(HOME, 'CLAUDE', 'agent-memory-bridge')
@@ -86,6 +87,7 @@ export function buildMemory(root = DEFAULT_BRIDGE_ROOT) {
       exists: statMaybe(statusPath).exists,
       updatedAt: statMaybe(statusPath).updatedAt || null,
     },
+    sourceOfTruth: sourceOfTruthStatus({ vaultPath }),
     policy: 'review-first: sync -> inbox, promote/archive -> durable vault context',
     ts: Date.now(),
   }

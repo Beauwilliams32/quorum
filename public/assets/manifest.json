@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-03",
+  "policy": {
+    "source": "original-generated-art",
+    "containsText": false,
+    "containsLogos": false,
+    "fallback": "procedural-three-js-or-css",
+    "maxDisplayBytes": 8388608
+  },
+  "assets": [
+    {
+      "id": "city-backdrop",
+      "path": "/assets/quorum-astral-city-backdrop.png",
+      "kind": "atmosphere",
+      "dimensions": [1672, 941],
+      "usage": "darkened full-bleed Agent City backdrop",
+      "fallback": "radial-gradient city stage"
+    },
+    {
+      "id": "agent-role-atlas",
+      "path": "/assets/quorum-agent-role-atlas.png",
+      "kind": "role-token-atlas",
+      "dimensions": [1536, 1024],
+      "dimensionsNote": "8 role vignettes in a 4x2 atlas",
+      "usage": "optional roster and inspector art",
+      "fallback": "code-native role initials and SVG avatars"
+    },
+    {
+      "id": "district-landmark-atlas",
+      "path": "/assets/quorum-district-landmark-atlas.png",
+      "kind": "district-landmark-atlas",
+      "dimensions": [1536, 1024],
+      "dimensionsNote": "6 district vignettes in a 3x2 atlas",
+      "usage": "optional district/empty-state art",
+      "fallback": "procedural Three.js building silhouettes"
+    },
+    {
+      "id": "state-effects",
+      "path": null,
+      "kind": "procedural-state-fx",
+      "usage": "working, reading, testing, blocked, recovering, approval-required, completed",
+      "fallback": "emissive meshes, beacons, rings, and CSS motion"
+    }
+  ]
+}

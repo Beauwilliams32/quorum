@@ -1,23 +1,34 @@
 {
   "name": "quorum",
   "version": "0.1.0",
-  "description": "The writers' room for your codebase — a local cockpit where AI specialists debate your decisions and hand you the record.",
+  "description": "A local-first agentic OS for project discovery, memory, missions, verification, and adversarial AI decisions.",
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "install:local": "bash scripts/install.sh",
-    "install:agent-control": "node scripts/install-agent-control.mjs",
     "dev": "node server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.mjs && npm --prefix portal-gateway test",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
-    "check": "node --check server.js && node --check scripts/install-local.mjs && node --check scripts/install-agent-control.mjs && node --check bin/agent && node --check src/state.js && node --check src/health.js && node --check src/pty.js && node --check src/util.js && node --check src/presence.js && node --check src/paths.js && node --check src/config.js && node --check src/catalog.js && node --check src/command.js && node --check src/operations.js && node --check src/validate.js && node --check src/licence.js && node --check src/edition.js && node --check src/cast-locked.js && node --check src/cast.js && node --check src/roundtable.js && node --check src/decision-record.js && node --check src/agent-control/policy.js && node --check src/agent-control/store.js && node --check src/agent-control/manager.js && node --check src/agent-control/adapters.js && node --check src/agent-control/doctor.js && node --check src/agents/packs.js && node --check src/collectors/processes.js && node --check src/collectors/sessions.js && node --check src/collectors/services.js && node --check src/collectors/system.js && node --check src/collectors/projects.js && node --check src/collectors/tasks.js && node --check src/collectors/composio.js && node --check src/collectors/agents.js && node --check src/collectors/memory.js && node --check public/app.js && node --check public/art.js && node --check scripts/bootstrap.mjs",
-    "bootstrap": "node scripts/bootstrap.mjs"
+    "check": "node --check src/openclaw-bridge.js && node --check server.js && node --check scripts/install-local.mjs && node --check scripts/pipeline/pipeline.mjs && node --check bin/agent && node --check bin/quorum && node --check src/state.js && node --check src/health.js && node --check src/pty.js && node --check src/util.js && node --check src/presence.js && node --check src/paths.js && node --check src/config.js && node --check src/catalog.js && node --check src/command.js && node --check src/operations.js && node --check src/validate.js && node --check src/licence.js && node --check src/edition.js && node --check src/cast-locked.js && node --check src/cast.js && node --check src/roundtable.js && node --check src/decision-record.js && node --check src/platform-control.js && node --check src/standing-jobs.js && node --check src/city-state.js && node --check src/agent-control/policy.js && node --check src/agent-control/store.js && node --check src/agent-control/manager.js && node --check src/agent-control/adapters.js && node --check src/agent-control/provider-registry.js && node --check src/agent-control/benchmark.js && node --check src/agent-control/doctor.js && node --check src/agents/packs.js && node --check src/collectors/processes.js && node --check src/collectors/sessions.js && node --check src/collectors/services.js && node --check src/collectors/system.js && node --check src/collectors/projects.js && node --check src/collectors/tasks.js && node --check src/collectors/composio.js && node --check src/collectors/agents.js && node --check src/collectors/memory.js && node --check src/source-of-truth.js && node --check src/artifacts.js && node --check src/missions.js && node --check src/registry.js && node --check src/runtime-events.js && node --check src/runtime-manager.js && node --check src/memory-bridge.js && node --check public/app.js && node --check public/art.js && node --check public/city.js && node --check scripts/bootstrap.mjs",
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "quorum": "node bin/quorum",
+    "quorum:tools": "node bin/quorum tools",
+    "quorum:mcp": "node bin/quorum mcp list",
+    "pipeline": "node scripts/pipeline/pipeline.mjs"
+  },
+  "bin": {
+    "quorum": "bin/quorum",
+    "agent": "bin/agent"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "node-pty": "^1.0.0",
+    "three": "0.180.0",
     "ws": "^8.18.0"
+  },
+  "allowScripts": {
+    "node-pty": true
   },
   "license": "MIT",
   "repository": {

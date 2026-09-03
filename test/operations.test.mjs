@@ -18,6 +18,7 @@ test('buildOperations projects local state without transcripts or credentials', 
   assert.equal(result.sessions[0].summary, 'hello world')
   assert.equal(result.sessions[0].secret, undefined)
   assert.equal(result.nodes.find(node => node.id === 'openclaw').detail, '127.0.0.1:18790')
+  assert.equal(result.nodes.find(node => node.id === 'comfyui').detail, '127.0.0.1:8199')
   assert.equal(result.channels.find(channel => channel.id === 'composio').detail, '1 local toolkits')
   assert.equal(result.events[0].text, 'event text')
   assert.equal(JSON.stringify(result).includes('nope'), false)

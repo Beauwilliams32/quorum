@@ -1,8 +1,14 @@
-# Quorum
+# Quorum — the agentic OS for your projects
 
-Quorum is a local-first cockpit and AI roundtable for your codebase. The
-Command view adds project readiness, model/harness inventory, pet identities,
-and guarded launch, stop, route, and chain controls.
+Quorum is a local-first agentic OS: a cockpit, memory index, mission control
+plane, and adversarial AI roundtable for the projects on your machine. It helps
+you understand what is wrong, decide what matters, and move verified work to
+completion while keeping high-impact actions under your control.
+
+The Command view adds project readiness, model/harness inventory, pet
+identities, and guarded launch, stop, route, and chain controls. The operator
+memory contract in `docs/agent-control/operator-memory.md` tells the system
+which durable sources and skills to read without copying your private vault.
 
 ## Run
 

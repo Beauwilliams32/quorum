@@ -6,11 +6,13 @@
 <title>Quorum</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 120'><path d='M36 54 C30 68 23 84 23 93 Q23 102 33 102 L67 102 Q77 102 77 93 C77 84 70 68 64 54 Z' fill='%23f5a524' stroke='%2312141c' stroke-width='4'/><rect x='27' y='17' width='46' height='40' rx='13' fill='%23f5a524' stroke='%2312141c' stroke-width='4'/><circle cx='42' cy='37' r='5' fill='%2312141c'/><circle cx='58' cy='37' r='5' fill='%2312141c'/><path d='M50 2 L58 18 L50 15 L42 18 Z' fill='%23ffd48a' stroke='%2312141c' stroke-width='3'/></svg>">
 <link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/design-system.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
 <header id="topbar">
+  <span id="topbar-scanline" class="hud-scanline" aria-hidden="true"></span>
   <span class="brand"><span id="mascot-slot"></span><span class="brand-word">QUORUM</span><span id="edition-badge" class="edition free">FREE</span></span>
   <nav id="view-toggle" aria-label="View">
     <button type="button" data-view="office" class="on">Studio</button>
@@ -18,6 +20,8 @@
     <button type="button" data-view="table">Roundtable</button>
     <button type="button" data-view="deck">Deck</button>
     <button type="button" data-view="board">Board</button>
+    <button type="button" data-view="missions">Missions</button>
+    <button type="button" data-view="memory">Memory</button>
     <button type="button" data-view="radar">Radar</button>
   </nav>
   <span id="tb-tasks"></span>
@@ -101,10 +105,25 @@
   <section class="command-main">
     <div class="col-head">TRIDENT COMMAND · UNIFIED OPERATOR</div>
     <div class="command-hero">
-      <div><span class="eyebrow">LOCAL OPERATING SYSTEM</span><h1>Everything in motion.</h1><p>Portfolio readiness, Quorum decisions, live sessions, and validated runtimes in one local command surface.</p></div>
+      <div><span class="eyebrow">LOCAL OPERATING SYSTEM</span><h1>Control the work. Keep the evidence.</h1><p>Route bounded tasks into real runtimes, watch their leases, and keep the memory that makes the next run faster.</p></div>
       <div id="command-connection" class="command-connection">catalog loading…</div>
     </div>
     <div id="command-pulse" class="command-pulse"></div>
+    <section id="command-now" class="command-now" aria-live="polite"></section>
+    <section class="operator-console" aria-labelledby="operator-console-title">
+      <div class="operator-console-head">
+        <div><span class="eyebrow">LIVE CONTROL SURFACE</span><h2 id="operator-console-title">Operator console</h2></div>
+        <button type="button" id="operator-refresh" class="icon-action" title="Refresh workspace, tool, and provider status" aria-label="Refresh operator status">↻</button>
+      </div>
+      <div id="operator-tabs" class="operator-tabs" role="tablist" aria-label="Operator console">
+        <button type="button" role="tab" data-operator-tab="attention">Attention</button>
+        <button type="button" role="tab" data-operator-tab="agents">Agents</button>
+        <button type="button" role="tab" data-operator-tab="workspaces">Workspaces</button>
+        <button type="button" role="tab" data-operator-tab="tools">Tools + MCP</button>
+        <button type="button" role="tab" data-operator-tab="activity">Activity</button>
+      </div>
+      <div id="operator-surface" class="operator-surface"><div class="empty">loading live operator state…</div></div>
+    </section>
     <section class="task-workbench" aria-labelledby="task-workbench-title">
       <div class="workbench-head"><div><span class="eyebrow">TASK-SPECIFIC AGENTS</span><h2 id="task-workbench-title">Pick the job. Route the brains.</h2><p>Built-in contracts keep each agent focused while Quorum lets you use Claude, Codex, Copilot, Hermes, Gemini, Ollama, or any validated local CLI.</p></div><span class="workbench-badge">NO KEYS IN QUORUM</span></div>
       <form id="agent-form" class="agent-form" autocomplete="off">
@@ -121,9 +140,65 @@
   </section>
   <aside class="command-side">
     <div class="card"><div class="card-head">GUARDED CONTROL</div><p class="hint">Every launch, stop, route, and chain is previewed, explicitly confirmed, and written to the local event feed.</p><div id="command-preview" class="command-preview">select a runtime to preview launch</div><div id="command-actions" class="deck-actions"></div></div>
+    <div class="card connection-card"><div class="card-head">CONNECTION MAP <button type="button" id="connection-refresh" class="icon-action" title="Probe local connections" aria-label="Probe local connections">↻</button></div><div id="connection-map" class="connection-map"><div class="empty-sm">probing local links…</div></div></div>
     <div class="card"><div class="card-head">DECISION FLOW</div><div class="command-flow">Question <b>→</b> Roundtable <b>→</b> Approval <b>→</b> Task <b>→</b> Harness</div><button id="command-roundtable" type="button">open roundtable handoff</button></div>
     <div class="card"><div class="card-head">SAFETY BOUNDARY</div><div class="kv"><div>storage <b>local only</b></div><div>auth <b>existing CLI / env</b></div><div>secrets <b>never displayed</b></div><div>pet assets <b>~/.quorum/pets</b></div></div></div>
     <div class="card"><div class="card-head">AGENT CONTROL <span>LEASED</span></div><div id="agent-control-card" class="agent-control-card"><div class="empty-sm">control plane warming up…</div></div></div>
+  </aside>
+</main>
+
+<!-- ── MISSIONS ─────────────────────────────────────────────────────── -->
+<main id="view-missions" class="view hidden">
+  <section id="missions-main">
+    <div class="col-head">MISSION CONTROL <span id="mission-count"></span></div>
+    <div class="mission-intro"><span class="eyebrow">DURABLE WORK</span><h1>Turn intent into accountable runs.</h1><p>Each mission keeps its objective, task dependencies, agent assignment, artifacts, and operational history in Quorum’s local core.</p></div>
+    <form id="mission-form" class="mission-form" autocomplete="off">
+      <fieldset class="mission-template" aria-label="Mission shape">
+        <legend>Mission shape</legend>
+        <label><input type="radio" name="mission-template" value="build" checked><span>Build + verify</span></label>
+        <label><input type="radio" name="mission-template" value="audit"><span>Audit</span></label>
+        <label><input type="radio" name="mission-template" value="single"><span>Single task</span></label>
+      </fieldset>
+      <label class="fld"><span>Mission title</span><input id="mission-title" maxlength="180" placeholder="Unify the operator workspace"></label>
+      <label class="fld"><span>Objective</span><textarea id="mission-objective" rows="3" maxlength="4000" placeholder="Make the current Quorum workspace searchable and useful to every agent."></textarea></label>
+      <div class="mission-form-grid">
+        <label class="fld"><span>First task</span><input id="mission-task" maxlength="180" placeholder="Index the local agent artifacts"></label>
+        <label class="fld"><span>Room</span><select id="mission-room"></select></label>
+        <label class="fld"><span>Runtime</span><select id="mission-runtime"></select></label>
+      </div>
+      <button type="submit" id="mission-create">create mission</button>
+      <span id="mission-form-status" class="form-status"></span>
+    </form>
+    <div id="mission-list" class="mission-list"></div>
+  </section>
+  <aside id="mission-detail-col">
+    <div class="col-head">SELECTED MISSION</div>
+    <div id="mission-detail" class="mission-detail"><div class="empty">Select a mission to inspect its task graph.</div></div>
+  </aside>
+</main>
+
+<!-- ── MEMORY RING ──────────────────────────────────────────────────── -->
+<main id="view-memory" class="view hidden">
+  <section id="memory-main">
+    <div class="col-head">MEMORY RING <span id="artifact-count"></span></div>
+    <div class="memory-toolbar">
+      <form id="artifact-search-form" autocomplete="off">
+        <label class="search-field"><span class="sr-only">Search local artifacts</span><input id="artifact-query" type="search" placeholder="Search vault, Codex, Claude, and workspace artifacts"></label>
+        <select id="artifact-source" aria-label="Artifact source"><option value="">all sources</option><option value="vault">Obsidian</option><option value="codex">Codex</option><option value="claude">Claude</option><option value="workspace">Workspace</option></select>
+        <button type="submit">search</button>
+      </form>
+      <button type="button" id="artifact-reindex">reindex now</button>
+      <button type="button" id="memory-sync">sync bridge</button>
+      <button type="button" id="memory-recall">recall context</button>
+      <span id="artifact-status" class="form-status"></span>
+    </div>
+    <div id="memory-ring" class="memory-ring"></div>
+    <pre id="memory-recall-output" class="memory-recall-output hidden"></pre>
+    <div id="artifact-results" class="artifact-results"></div>
+  </section>
+  <aside id="artifact-detail-col">
+    <div class="col-head">ARTIFACT PREVIEW <span id="artifact-detail-source"></span></div>
+    <div id="artifact-detail" class="artifact-detail"><div class="empty">Select an indexed artifact. Previews are bounded and secret-redacted.</div></div>
   </aside>
 </main>
 
@@ -192,6 +267,14 @@
       <span id="deck-connection">LIVE LINK · —</span>
     </div>
     <div id="deck-space" aria-label="3D project and agent command room">
+      <canvas id="city-canvas" tabindex="0" aria-label="Navigable 3D agent city. Drag to orbit, scroll to zoom, and select buildings or workers."></canvas>
+      <div class="city-toolbar">
+        <label><span class="sr-only">Find a project, agent, or process</span><input id="city-search" type="search" placeholder="Find building, agent, process"></label>
+        <select id="city-filter" aria-label="City entity filter"><option value="all">all entities</option><option value="building">buildings</option><option value="agent">agents</option><option value="process">processes</option></select>
+        <button type="button" id="city-list-toggle" aria-expanded="false" title="Toggle accessible city index">☷</button>
+      </div>
+      <div id="city-index" class="city-index hidden" aria-label="City entity index"></div>
+      <div id="city-live-label" class="city-live-label" aria-live="polite">city loading</div>
       <div class="deck-grid-plane"></div>
       <div class="deck-orbit orbit-a"></div>
       <div class="deck-orbit orbit-b"></div>
@@ -208,6 +291,14 @@
     <div class="card deck-status-card">
       <div class="card-head">SYSTEM PRESSURE <span id="deck-pressure-label">—</span></div>
       <div id="deck-stats" class="deck-stats"></div>
+    </div>
+    <div class="card deck-art-card">
+      <div class="card-head">GUILD ATLAS <span>ORIGINAL ART</span></div>
+      <div class="deck-art-grid" aria-label="Original agent role and district artwork">
+        <div class="deck-art-tile role-art" title="Agent roles"></div>
+        <div class="deck-art-tile district-art" title="Agent City districts"></div>
+      </div>
+      <small>Generated atmosphere supports the city; live state remains code-native and inspectable.</small>
     </div>
     <div class="card">
       <div class="card-head">SELECTED NODE <span id="deck-detail-kind">—</span></div>

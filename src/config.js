@@ -96,6 +96,7 @@ export const BUILTIN_RUNTIMES = [
   { id: 'hermes', label: 'hermes', command: 'hermes', provider: 'hermes', kind: 'local', promptMode: 'arg', promptFlag: '--query', modelFlag: '--model', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
   { id: 'openclaw', label: 'openclaw', command: 'openclaw', provider: 'openclaw', kind: 'local', promptMode: 'interactive', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
   { id: 'ollama', label: 'ollama', command: 'ollama', provider: 'ollama', kind: 'local', promptMode: 'arg', modelDiscovery: 'ollama', roundtable: true, capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
+  { id: 'cursor', label: 'cursor', command: 'cursor', provider: 'cursor', kind: 'local', promptMode: 'interactive', capabilities: ['discover', 'read', 'test', 'edit'], builtin: true },
   { id: 'shell', label: 'zsh', command: null, builtin: true },
 ]
 

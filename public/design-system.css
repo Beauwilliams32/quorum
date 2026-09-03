@@ -1,0 +1,135 @@
+/* Quorum Design System: production tokens and state motifs.
+   Kept separate from component/layout rules so the no-build cockpit can be
+   audited and reused without importing the prototype React kit. */
+:root {
+  /* Canvas and surfaces */
+  --ink: oklch(0.08 0.016 265);
+  --stage-wall: oklch(0.12 0.018 265);
+  --stage-mid: oklch(0.15 0.022 265);
+  --stage-floor: oklch(0.18 0.025 265);
+  --stage-edge: oklch(0.24 0.032 265);
+  --surface-card: oklch(1 0 0 / 0.045);
+  --surface-raised: oklch(1 0 0 / 0.075);
+  --surface-active: oklch(0.82 0.14 210 / 0.14);
+  --surface-quiet: oklch(1 0 0 / 0.025);
+  --border-subtle: oklch(1 0 0 / 0.075);
+  --border-strong: oklch(1 0 0 / 0.14);
+  --border-active: oklch(0.82 0.14 210 / 0.72);
+
+  /* Text */
+  --text-strong: oklch(0.97 0.015 255);
+  --text-body: oklch(0.87 0.025 255);
+  --text-meta: oklch(0.69 0.035 260);
+  --text-faint: oklch(0.53 0.035 260);
+  --faint: oklch(0.45 0.03 260);
+  --ghost: oklch(0.36 0.026 260);
+
+  /* Agent and system state */
+  --state-command: oklch(0.82 0.14 210);
+  --state-ok: oklch(0.78 0.16 155);
+  --state-warn: oklch(0.84 0.16 90);
+  --state-danger: oklch(0.72 0.18 15);
+  --state-roundtable: oklch(0.78 0.16 65);
+  --state-memory: oklch(0.77 0.15 295);
+  --state-local: oklch(0.78 0.16 155);
+
+  /* Typography: native-first keeps the local cockpit usable offline. */
+  --font-ui: "Avenir Next", "SF Pro Text", "Nunito Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Monaco, Consolas, monospace;
+  --text-display: 30px;
+  --text-title: 20px;
+  --text-body-size: 13px;
+  --text-meta-size: 10px;
+  --leading-body: 1.5;
+  --leading-tight: 1.15;
+
+  /* Geometry */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --pad-card: var(--space-4);
+  --pad-col-head: var(--space-2) var(--space-3);
+  --radius-control: 5px;
+  --radius-card: 7px;
+  --radius-panel: 10px;
+  --radius-pill: 999px;
+  --topbar-h: 38px;
+  --rail-narrow: 260px;
+  --rail-wide: 330px;
+  --ring-size: 1px;
+  --focus-ring: 2px solid var(--state-command);
+
+  /* Motion is deliberately quiet. */
+  --duration-fast: 140ms;
+  --duration-base: 180ms;
+  --ease-standard: cubic-bezier(.2, .8, .2, 1);
+  --shadow-card-inner: inset 0 0 0 1px oklch(1 0 0 / 0.02);
+}
+
+/* The reticle is reserved for an explicitly selected or live surface. */
+.hud-reticle {
+  position: relative;
+}
+.hud-reticle::before,
+.hud-reticle::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  pointer-events: none;
+  z-index: 6;
+}
+.hud-reticle::before {
+  top: 5px;
+  left: 5px;
+  border-top: var(--ring-size) solid var(--state-command);
+  border-left: var(--ring-size) solid var(--state-command);
+}
+.hud-reticle::after {
+  right: 5px;
+  bottom: 5px;
+  border-right: var(--ring-size) solid var(--state-command);
+  border-bottom: var(--ring-size) solid var(--state-command);
+}
+
+/* A scanline communicates actual live work, not a permanent sci-fi texture. */
+.hud-scanline {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 1px;
+  background: var(--state-command);
+  box-shadow: 0 0 10px var(--state-command);
+  opacity: 0;
+  pointer-events: none;
+}
+.hud-scanline.active {
+  opacity: .7;
+  animation: quorum-scanline 2.8s var(--ease-standard) infinite;
+}
+@keyframes quorum-scanline {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(100vw); }
+}
+
+/* Two understated orbit rings give the Roundtable a stable spatial anchor. */
+.rt-table::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 66%;
+  height: 58%;
+  transform: translate(-50%, -50%) rotate(-8deg);
+  border: 1px dashed oklch(0.78 0.16 65 / .28);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-scanline.active { animation: none; }
+}

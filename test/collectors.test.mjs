@@ -7,6 +7,7 @@ import { shortName } from '../src/collectors/processes.js'
 import { buildAgents } from '../src/collectors/agents.js'
 import { buildTasks } from '../src/collectors/tasks.js'
 import { TranscriptWatcher } from '../src/collectors/sessions.js'
+import { probeComfy } from '../src/collectors/services.js'
 import { tailBytes, jsonLines } from '../src/util.js'
 import { loadRuntimes, loadModels, BUILTIN_RUNTIMES, BUILTIN_MODELS } from '../src/config.js'
 import { lockedMember, LOCKED_CAST } from '../src/cast-locked.js'
@@ -108,4 +109,30 @@ test('lockedMember looks up Pro appearance metadata without a persona', () => {
     assert.equal(c.edition, 'pro')
     assert.equal('prompt' in c, false)
   }
+})
+
+test('probeComfy uses the active local engine port and returns queue telemetry', async () => {
+  const calls = []
+  const fetchImpl = async url => {
+    calls.push(url)
+    if (url.endsWith('/system_stats')) return new Response(JSON.stringify({ devices: [{ name: 'mps', vram_free: 8_000_000_000 }] }), { status: 200 })
+    return new Response(JSON.stringify({ queue_running: [['id']], queue_pending: [['next']] }), { status: 200 })
+  }
+  const result = await probeComfy(fetchImpl, [8199, 8188])
+  assert.deepEqual(result, { up: true, port: 8199, running: 1, pending: 1, device: 'mps', vramFreeGB: 8 })
+  assert.deepEqual(calls, ['http://127.0.0.1:8199/system_stats', 'http://127.0.0.1:8199/queue'])
+})
+
+test('probeComfy falls back to the legacy local port only after the active port is unavailable', async () => {
+  const calls = []
+  const fetchImpl = async url => {
+    calls.push(url)
+    if (url.includes(':8199/')) throw new Error('connection refused')
+    if (url.endsWith('/system_stats')) return new Response(JSON.stringify({ devices: [] }), { status: 200 })
+    return new Response(JSON.stringify({ queue_running: [], queue_pending: [] }), { status: 200 })
+  }
+  const result = await probeComfy(fetchImpl, [8199, 8188])
+  assert.equal(result.up, true)
+  assert.equal(result.port, 8188)
+  assert.deepEqual(calls, ['http://127.0.0.1:8199/system_stats', 'http://127.0.0.1:8188/system_stats', 'http://127.0.0.1:8188/queue'])
 })

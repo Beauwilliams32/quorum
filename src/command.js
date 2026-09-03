@@ -29,7 +29,7 @@ export function previewAction(input = {}, catalog, state, ptys) {
       if (provider !== runtime.id) throw new Error(`model provider ${provider} does not match ${runtime.id}`)
       let contractFile = null
       try { contractFile = agentPackPromptPath(pack.id) } catch { /* custom packs carry a validated local contract; no browser exposure */ }
-      const built = buildTaskLaunch({ runtime: runtime.id, runtimeSpec: runtime, role: pack.role, cwd: room.cwd, task: input.task, model, promptFile: contractFile })
+      const built = buildTaskLaunch({ runtime: runtime.id, runtimeSpec: runtime, role: pack.role, cwd: room.cwd, task: input.task, model, promptFile: contractFile, structured: input.managed === true })
       // Never return the launch environment to the browser: it inherits the
       // user's runtime auth and may contain provider credentials.
       const { env: _secretBearingEnv, ...launch } = built

@@ -8,6 +8,8 @@ import { buildLaunch, buildTaskLaunch, detectRuntimes, spawnLaunch } from '../sr
 import { publicAgentPacks, resolveAgentPack, agentPackPromptPath } from '../src/agents/packs.js'
 import { loadRuntimes } from '../src/config.js'
 import { runDoctor } from '../src/agent-control/doctor.js'
+import { providerCatalog, TASK_ROUTING } from '../src/agent-control/provider-registry.js'
+import { benchmarkPlan, runBenchmarks } from '../src/agent-control/benchmark.js'
 
 const manager = new AgentControlManager()
 const args = process.argv.slice(2)
@@ -17,7 +19,7 @@ const has = flag => args.includes(flag)
 const json = value => console.log(JSON.stringify(value, null, 2))
 const MANAGED_LAUNCHD_PREFIXES = ['ai.hermes.', 'com.beauwilliams.', 'com.tridentsocial.', 'com.williamsmedia.']
 const isManagedLaunchAgent = file => MANAGED_LAUNCHD_PREFIXES.some(prefix => path.basename(file).startsWith(prefix))
-const help = () => console.log(`agent doctor\nagent packs\nagent run [--runtime claude] [--role researcher|builder|operator|recovery] [--repo PATH] [--target-json JSON] -- COMMAND [ARGS...]\nagent run --pack builder --runtime claude --repo PATH --task "..."\nagent claim --role ROLE --repo PATH [--worktree PATH]\nagent heartbeat RUN_ID [--phase NAME]\nagent checkpoint RUN_ID [--reason TEXT] [--tests JSON] [--changed-files JSON]\nagent approve ACTION_ID\nagent close RUN_ID [--disposition completed|blocked] [--next-owner-action TEXT]\nagent recover`)
+const help = () => console.log(`agent doctor\nagent providers\nagent benchmark [--execute] [--runtime ID] [--allow-cloud]\nagent packs\nagent run [--runtime claude] [--role researcher|builder|operator|recovery] [--repo PATH] [--target-json JSON] -- COMMAND [ARGS...]\nagent run --pack builder --runtime claude --repo PATH --task "..."\nagent claim --role ROLE --repo PATH [--worktree PATH]\nagent heartbeat RUN_ID [--phase NAME]\nagent checkpoint RUN_ID [--reason TEXT] [--tests JSON] [--changed-files JSON]\nagent approve ACTION_ID\nagent close RUN_ID [--disposition completed|blocked] [--next-owner-action TEXT]\nagent recover`)
 function localWiring(home = process.env.HOME || os.homedir()) {
   const launchAgents = path.join(home, 'Library', 'LaunchAgents')
   const launchd = []
@@ -60,6 +62,21 @@ if (command === 'doctor') {
 }
 if (command === 'packs') {
   json(publicAgentPacks({ runtimes: detectRuntimes(), modelOptions: [] }))
+  process.exit(0)
+}
+if (command === 'providers') {
+  const runtimes = detectRuntimes()
+  json({ contractVersion: 1, providers: providerCatalog({ runtimes }), taskRouting: TASK_ROUTING })
+  process.exit(0)
+}
+if (command === 'benchmark') {
+  const runtimes = detectRuntimes()
+  const runtimeId = value('--runtime') || null
+  if (!has('--execute')) {
+    json({ mode: 'dry-run', contractVersion: 1, plans: benchmarkPlan({ runtimes }).filter(plan => !runtimeId || plan.runtime === runtimeId) })
+    process.exit(0)
+  }
+  json(await runBenchmarks({ runtimes, cwd: process.cwd(), runtimeId, allowCloud: has('--allow-cloud') }))
   process.exit(0)
 }
 if (command === 'claim') {

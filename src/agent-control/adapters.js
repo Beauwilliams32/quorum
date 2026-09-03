@@ -4,20 +4,17 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { loadRuntimes } from '../config.js'
+import { RUNTIME_ADAPTERS, resolveProviderSpec } from './provider-registry.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const EXTRA_PATHS = [path.join(os.homedir(), '.local', 'bin'), path.join(os.homedir(), '.npm-global', 'bin'), '/opt/homebrew/bin', '/usr/local/bin']
 
-export const RUNTIMES = {
-  claude: { command: 'claude', label: 'Claude Code' },
-  codex: { command: 'codex', label: 'Codex CLI' },
-  copilot: { command: 'copilot', label: 'GitHub Copilot CLI' },
-  hermes: { command: 'hermes', label: 'Hermes' },
-  openclaw: { command: 'openclaw', label: 'OpenClaw' },
-  gemini: { command: 'gemini', label: 'Gemini' },
-  ollama: { command: 'ollama', label: 'Ollama/local model' },
-  generic: { command: null, label: 'Generic command agent' },
-}
+// Kept as a compatibility export for callers that only need the executable
+// inventory.  The provider registry is the source of adapter behavior.
+export const RUNTIMES = Object.fromEntries([
+  ...Object.entries(RUNTIME_ADAPTERS).map(([id, spec]) => [id, { ...spec }]),
+  ['generic', { command: null, label: 'Generic command agent', provider: 'generic', kind: 'custom' }],
+])
 
 export function executablePath(command, env = process.env) {
   if (path.isAbsolute(command)) return fs.existsSync(command) ? command : null
@@ -34,39 +31,66 @@ export function detectRuntimes(env = process.env) {
   const specs = new Map([...Object.entries(RUNTIMES), ...configured.filter(item => item.id).map(item => [item.id, item])])
   return [...specs.entries()].filter(([id, runtime]) => id !== 'generic' && runtime.command).map(([id, runtime]) => {
     const resolved = executablePath(runtime.command, env)
-    return { id, label: runtime.label, provider: runtime.provider || id, kind: runtime.kind || 'custom', command: runtime.command, path: resolved, available: Boolean(resolved), promptMode: runtime.promptMode || 'stdin', modelDiscovery: runtime.modelDiscovery || 'none', capabilities: runtime.capabilities || [] }
+    const providerSpec = resolveProviderSpec(id, runtime)
+    return {
+      id,
+      label: runtime.label,
+      provider: providerSpec?.provider || runtime.provider || id,
+      kind: providerSpec?.kind || runtime.kind || 'custom',
+      command: runtime.command,
+      path: resolved,
+      available: Boolean(resolved),
+      promptMode: providerSpec?.promptMode || runtime.promptMode || 'stdin',
+      modelDiscovery: providerSpec?.modelDiscovery || runtime.modelDiscovery || 'none',
+      capabilities: runtime.capabilities || providerSpec?.capabilities || [],
+      authReference: providerSpec?.authReference || 'user-managed-reference',
+      structuredOutput: providerSpec?.structuredOutput || 'text',
+      benchmark: providerSpec?.benchmark || { supported: false, reason: 'custom runtime requires explicit harness validation' },
+      contractVersion: 1,
+    }
   })
 }
 
 export function buildLaunch({ runtime = 'generic', role = 'researcher', cwd = process.cwd(), argv = [], runtimeSpec = null } = {}) {
   const configured = runtimeSpec || loadRuntimes().find(item => item.id === runtime)
-  const spec = RUNTIMES[runtime] || configured || { command: runtime, label: runtime }
+  const spec = resolveProviderSpec(runtime, RUNTIMES[runtime] || configured) || configured || { command: runtime, label: runtime }
   const command = argv[0] || spec.command
   if (!command) throw new Error('missing runtime command')
   const args = argv.length ? argv.slice(1) : []
   const promptFile = path.join(ROOT, 'prompts', 'agent-system.md')
+  const readOnly = role === 'researcher' || role === 'recovery'
   if (runtime === 'claude' && !args.includes('--append-system-prompt-file')) {
-    args.push('--append-system-prompt-file', promptFile, '--permission-mode', role === 'researcher' || role === 'recovery' ? 'plan' : 'acceptEdits')
+    args.push('--append-system-prompt-file', promptFile, spec.safeLaunch.permissionFlag, readOnly ? spec.safeLaunch.readOnly : spec.safeLaunch.write)
   }
   if (runtime === 'codex' && !args.includes('--cd')) {
-    args.push('--cd', path.resolve(cwd), '--sandbox', role === 'researcher' || role === 'recovery' ? 'read-only' : 'workspace-write', '--ask-for-approval', role === 'researcher' || role === 'recovery' ? 'untrusted' : 'on-request')
+    args.push(spec.safeLaunch.workdirFlag, path.resolve(cwd), spec.safeLaunch.sandboxFlag, readOnly ? spec.safeLaunch.readOnly : spec.safeLaunch.write, spec.safeLaunch.approvalFlag, readOnly ? spec.safeLaunch.readOnlyApproval : spec.safeLaunch.writeApproval)
   }
   if (runtime === 'hermes' && !args.includes('--in')) {
-    args.push('--in', path.resolve(cwd))
-    if (role === 'researcher' || role === 'recovery') args.push('--safe-mode')
+    args.push(spec.safeLaunch.workdirFlag, path.resolve(cwd))
+    if (readOnly) args.push(spec.safeLaunch.readOnlyFlag)
   }
-  if (runtime === 'openclaw' && !args.includes('--no-color')) {
-    args.push('--no-color')
+  if (spec.safeLaunch?.fixedArgs) {
+    for (const arg of spec.safeLaunch.fixedArgs) if (!args.includes(arg)) args.push(arg)
   }
   if (runtime === 'gemini' && !args.includes('--approval-mode')) {
-    args.push('--approval-mode', role === 'researcher' || role === 'recovery' ? 'plan' : 'auto_edit')
+    args.push(spec.safeLaunch.approvalFlag, readOnly ? spec.safeLaunch.readOnly : spec.safeLaunch.write)
   }
-  if (spec.workdirFlag && !args.includes(spec.workdirFlag) && !['claude', 'codex'].includes(runtime)) args.push(spec.workdirFlag, path.resolve(cwd))
+  if (spec.workdirFlag && !args.includes(spec.workdirFlag) && !['claude', 'codex', 'hermes'].includes(runtime)) args.push(spec.workdirFlag, path.resolve(cwd))
   const env = { ...process.env, QUORUM_AGENT_ROLE: role, QUORUM_AGENT_WORKDIR: path.resolve(cwd) }
   const pathValue = [...new Set([...String(env.PATH || '').split(path.delimiter), ...EXTRA_PATHS])].filter(Boolean).join(path.delimiter)
   env.PATH = pathValue
   env.QUORUM_AGENT_CONTRACT_FILE = promptFile
-  return { command: executablePath(command, env) || command, args, cwd: path.resolve(cwd), env, promptFile: fs.existsSync(promptFile) ? promptFile : null }
+  return {
+    command: executablePath(command, env) || command,
+    args,
+    cwd: path.resolve(cwd),
+    env,
+    promptFile: fs.existsSync(promptFile) ? promptFile : null,
+    provider: spec.provider || runtime,
+    authReference: spec.authReference || 'user-managed-reference',
+    structuredOutput: spec.structuredOutput || 'text',
+    safety: { readOnly, contractVersion: 1 },
+  }
 }
 
 const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`
@@ -76,9 +100,9 @@ const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`
  * it is one quoted argv value for runtimes that support prompt mode. Runtimes
  * without a known prompt flag still open in their normal interactive mode.
  */
-export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd = process.cwd(), task = '', model = '', promptFile = null, runtimeSpec = null } = {}) {
+export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd = process.cwd(), task = '', model = '', promptFile = null, runtimeSpec = null, structured = false } = {}) {
   const configured = runtimeSpec || loadRuntimes().find(item => item.id === runtime) || null
-  const adapterRuntime = RUNTIMES[runtime] ? runtime : (configured?.command || runtime)
+  const spec = resolveProviderSpec(runtime, RUNTIMES[runtime] || configured) || configured || { promptMode: 'stdin' }
   const plan = buildLaunch({ runtime, runtimeSpec: configured, role, cwd })
   const args = [...plan.args]
   const prompt = String(task || '').trim().slice(0, 8000)
@@ -87,9 +111,15 @@ export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd 
     args.unshift('-p', prompt || 'Inspect the current task and report the next safe action.')
     if (chosenModel && chosenModel !== 'auto') args.push('--model', chosenModel)
     if (promptFile && !args.includes(promptFile)) args.push('--append-system-prompt-file', promptFile)
+    if (structured) args.push('--output-format', 'stream-json', '--verbose')
   } else if (runtime === 'codex') {
+    // `--ask-for-approval` belongs to the interactive root command; codex exec
+    // has no such option and exits before creating a thread if it is present.
+    const approval = args.indexOf('--ask-for-approval')
+    if (approval >= 0) args.splice(approval, 2)
     args.unshift('exec', prompt || 'Inspect the current task and report the next safe action.')
     if (chosenModel && chosenModel !== 'auto') args.push('--model', chosenModel)
+    if (structured) args.push('--json')
   } else if (runtime === 'copilot') {
     args.unshift('-p', prompt || 'Inspect the current task and report the next safe action.')
     if (chosenModel && chosenModel !== 'auto') args.push('--model', chosenModel)
@@ -102,12 +132,15 @@ export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd 
   } else if (runtime === 'ollama') {
     const localModel = chosenModel && chosenModel !== 'auto' ? chosenModel : 'gemma3:latest'
     args.unshift('run', localModel, prompt || 'Inspect the current task and report the next safe action.')
-  } else if (configured?.promptMode === 'arg' && configured.promptFlag) {
-    args.push(configured.promptFlag, prompt || 'Inspect the current task and report the next safe action.')
-    if (chosenModel && configured.modelFlag) args.push(configured.modelFlag, chosenModel)
+  } else if (spec.promptMode === 'arg' && spec.promptFlag) {
+    args.push(spec.promptFlag, prompt || 'Inspect the current task and report the next safe action.')
+    if (chosenModel && spec.modelFlag) args.push(spec.modelFlag, chosenModel)
   }
   const command = [plan.command, ...args].map(shellQuote).join(' ')
-  const promptTransport = configured?.promptMode || (runtime === 'ollama' ? 'arg' : 'stdin')
+  // Claude -p and Codex exec both accept the prompt as an argv value. Leaving
+  // stdin open makes Codex wait for a second prompt, so managed invocations do
+  // not create a pipe unless a custom runtime explicitly requires stdin.
+  const promptTransport = ['claude', 'codex', 'ollama'].includes(runtime) ? 'arg' : (spec.promptMode || 'stdin')
   return { ...plan, args, shellCommand: command, input: promptTransport === 'stdin' ? `${prompt || 'Inspect the current task and report the next safe action.'}\n` : null, taskIncluded: Boolean(prompt), promptTransport, packPromptFile: promptFile }
 }
 

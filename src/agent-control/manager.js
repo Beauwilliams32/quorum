@@ -33,7 +33,7 @@ export class AgentControlManager {
     const ttl = (this.policy.lease?.ttlSeconds || 900) * 1000
     const run = {
       id: runId, runId, runtime: clean(input.runtime || 'generic'), role, packId: clean(input.packId), modelRef: clean(input.modelRef), repoRoot, worktree,
-      branch: clean(input.branch || ''), owner: clean(input.owner || os.userInfo().username), parentTask: clean(input.parentTask),
+      branch: clean(input.branch || ''), owner: clean(input.owner || os.userInfo().username), missionId: clean(input.missionId), parentTask: clean(input.parentTask),
       claimedPaths, leaseExpiresAt: stamp + ttl, heartbeatAt: stamp, missedHeartbeats: 0,
       plannedActions: Array.isArray(input.plannedActions) ? input.plannedActions.map(clean).filter(Boolean).slice(0, 20) : [],
       requiredGates: Array.isArray(input.requiredGates) ? input.requiredGates.map(clean).filter(Boolean).slice(0, 20) : [],
@@ -58,6 +58,16 @@ export class AgentControlManager {
     run.heartbeatAt = stamp; run.leaseExpiresAt = stamp + (this.policy.lease?.ttlSeconds || 900) * 1000; run.missedHeartbeats = 0; run.phase = clean(input.phase || run.phase); run.updatedAt = stamp
     this.store.append('runs', run)
     for (const claim of this.store.list('claims').filter(item => item.runId === runId && item.status === 'active')) { claim.leaseExpiresAt = run.leaseExpiresAt; claim.updatedAt = stamp; this.store.append('claims', claim) }
+    return run
+  }
+
+  providerSession(runId, providerSessionId) {
+    const run = this.getRun(runId)
+    const sessionId = clean(providerSessionId)
+    if (!sessionId) return run
+    run.providerSessionId = sessionId
+    run.updatedAt = this.clock()
+    this.store.append('runs', run)
     return run
   }
 
@@ -112,7 +122,7 @@ export class AgentControlManager {
       const misses = Number(run.missedHeartbeats || 0) + 1; run.missedHeartbeats = misses; run.lastRecoveryCheckAt = current; run.updatedAt = current; this.store.append('runs', run)
       if (run.status === 'active') { run.status = 'stale'; run.disposition = 'lease expired; awaiting missed-heartbeat confirmation'; run.updatedAt = current; this.store.append('runs', run) }
       if (misses < (this.policy.lease?.recoveryMisses || 3)) continue
-      const replacement = this.createRun({ runtime: run.runtime, role: 'recovery', repoRoot: run.repoRoot, worktree: run.worktree, branch: run.branch, owner: os.userInfo().username, parentTask: run.runId, claimedPaths: run.claimedPaths, plannedActions: ['recovery.inspect'], requiredGates: ['lease-expiry', 'missed-heartbeats'], packId: 'recovery' })
+      const replacement = this.createRun({ runtime: run.runtime, role: 'recovery', repoRoot: run.repoRoot, worktree: run.worktree, branch: run.branch, owner: os.userInfo().username, missionId: run.missionId, parentTask: run.runId, claimedPaths: run.claimedPaths, plannedActions: ['recovery.inspect'], requiredGates: ['lease-expiry', 'missed-heartbeats'], packId: 'recovery' })
       run.status = 'recovery-pending'; run.disposition = `replaced by ${replacement.runId}`; run.updatedAt = current; this.store.append('runs', run)
       for (const claim of this.store.list('claims').filter(item => item.runId === run.runId && item.status === 'active')) { claim.status = 'recovery-pending'; claim.updatedAt = current; this.store.append('claims', claim) }
       recovered.push(replacement)

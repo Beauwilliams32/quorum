@@ -2,13 +2,14 @@
 'use strict'
 
 import { drawCharacter, drawMascot, drawRoom, LOD, ROOM_FLOOR } from './art.js'
+import { focusCityEntity, updateAgentCity } from './city.js'
 
 // Rendered height of an avatar sprite: the SVG is drawn at 1.2× its width.
 const AVATAR_H = Math.round(LOD.avatar * 1.2)
 
 const S = {
-  processes: null, sessions: null, services: null, system: null, projects: null,
-  tasks: null, composio: null, agents: null, memory: null,
+  processes: null, sessions: null, services: null, openclaw: null, system: null, projects: null,
+  tasks: null, composio: null, agents: null, memory: null, artifacts: null, missions: null, city: null, standingJobs: null,
   hist: [], feed: [], selected: null, follow: true,
   terms: new Map(), activeTerm: null,
   // ?view= wins over the remembered view, so a view is linkable and a wedged
@@ -43,6 +44,9 @@ const S = {
   archive: [],
   catalog: null, agentControl: null,
   commandPreview: null,
+  commandSelection: { packId: null, runtimeId: null },
+  operatorTab: 'attention', operatorRegistry: null, operatorLoading: false,
+  artifactResults: null, artifactDetail: null, missionSelection: null, missionPreview: null, runtimeRuns: null, memoryBridge: null, recallContext: null,
 }
 
 const DEFAULT_MODEL_OPTIONS = [
@@ -83,12 +87,19 @@ const handlers = {
     S.processes = m.data.processes || null
     S.sessions = m.data.sessions || null
     S.services = m.data.services || null
+    S.openclaw = m.data.openclaw || null
     S.projects = m.data.projects || null
     S.tasks = m.data.tasks || null
     S.composio = m.data.composio || null
     S.agents = m.data.agents || null
     S.memory = m.data.memory || null
+    S.artifacts = m.data.artifacts || null
+    S.missions = m.data.missions || null
     S.agentControl = m.data.agentControl || null
+    S.runtimeRuns = m.data.runtimeRuns || null
+    S.memoryBridge = m.data.memoryBridge || null
+    S.city = m.data.city || null
+    S.standingJobs = m.data.standingJobs || null
     S.system = m.data.system?.latest || null
     S.hist = m.data.system?.hist ? [...m.data.system.hist] : []
     S.feed = m.feed || []
@@ -104,13 +115,20 @@ const handlers = {
       S[m.key] = m.data
       if (m.key === 'sessions') { renderSessions(); renderOffice(); renderRoomDetail(); renderDeck() }
       if (m.key === 'processes') { renderTopbar(); renderProcs(); renderOffice(); renderDeck() }
-      if (m.key === 'services') { renderTopbar(); renderServices(); renderOffice(); renderDeck() }
+      if (m.key === 'services') { renderTopbar(); renderServices(); renderOffice(); renderDeck(); renderConnectionMap() }
+      if (m.key === 'openclaw') { S.openclaw = m.data; renderDeck(); renderConnectionMap() }
       if (m.key === 'projects') { renderOffice(); renderRoomDetail(); renderAvatars(); renderDeck() }
       if (m.key === 'tasks') { renderBoard(); renderTopbar(); renderAvatars(); renderDeck() }
       if (m.key === 'composio') renderComposio()
       if (m.key === 'agents') { renderAgents(); renderAvatars(); renderDeck() }
       if (m.key === 'memory') { renderMemory(); renderTopbar(); renderDeck() }
+      if (m.key === 'artifacts') { S.artifactResults = null; renderMemoryRing() }
+      if (m.key === 'missions') renderMissions()
       if (m.key === 'agentControl') renderAgentControl()
+      if (m.key === 'runtimeRuns') { renderMissions(); renderTopbar() }
+      if (m.key === 'city') renderDeck()
+      if (m.key === 'standingJobs') { renderCommand(); renderDeck() }
+      if (m.key === 'memoryBridge') { renderMemory(); renderConnectionMap() }
     }
   },
   event(m) {
@@ -161,8 +179,8 @@ const handlers = {
       if (!c || c.locked) S.seated.delete(id)
     }
     persistSeated()
-    renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderEdition(); renderRuntimes()
-    renderCommand()
+    renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderEdition(); renderRuntimes(); renderMissions()
+    renderCommand(); renderConnectionMap()
   },
   'command.preview'(m) { S.commandPreview = m.preview; renderCommand() },
   'command.done'(m) { S.commandPreview = null; renderCommand(); renderFeed() },
@@ -213,6 +231,8 @@ const VIEWS = {
   table: 'view-table',
   deck: 'view-deck',
   board: 'view-board',
+  missions: 'view-missions',
+  memory: 'view-memory',
   radar: 'view-radar',
 }
 
@@ -226,9 +246,11 @@ function setView(view) {
   if (view === 'radar') renderSystem()
   if (view === 'deck') renderDeck()
   if (view === 'office') { renderOffice(); renderAvatars() }
-  if (view === 'command') renderCommand()
+  if (view === 'command') { renderCommand(); hydrateOperatorRegistry() }
   if (view === 'table') { renderRoundtable(); renderArchive() }
   if (view === 'board') { renderBoard(); renderComposio(); renderAgents() }
+  if (view === 'missions') renderMissions()
+  if (view === 'memory') renderMemoryRing()
 }
 
 for (const b of document.querySelectorAll('#view-toggle button'))
@@ -245,6 +267,9 @@ setView(S.view)
 function renderTopbar() {
   const g = S.processes?.groups || {}
   const sv = S.services || {}
+  const liveRun = (S.runtimeRuns?.runs || []).some(run => ['starting', 'running', 'paused'].includes(run.status))
+    || (S.agentControl?.runs || []).some(run => run.status === 'active')
+  $('topbar-scanline')?.classList.toggle('active', !!(liveRun || (S.debate && !S.debate.endedAt)))
   const dot = up => `<span class="dot ${up ? 'up' : 'down'}"></span>`
   $('tb-agents').innerHTML =
     `<span class="tb-item">${dot((g.claude || 0) > 0)}claude <b>${g.claude || 0}</b></span>` +
@@ -269,12 +294,30 @@ function renderCommand() {
   const catalog = S.catalog
   if (!catalog) { box.innerHTML = '<div class="empty">waiting for Quorum catalog…</div>'; return }
   const available = catalog.runtimes.filter(r => r.available).length
-  $('command-connection').textContent = `${available}/${catalog.runtimes.length} runtimes ready · ${catalog.config.projectCount} project roots · no secrets exposed`
   const rooms = S.projects?.rooms || []
+  $('command-connection').textContent = `${available}/${catalog.runtimes.length} runtimes ready · ${rooms.length} discovered rooms · no secrets exposed`
   $('command-pulse').innerHTML = `<div class="command-stat"><b>${rooms.length}</b><span>project rooms</span></div><div class="command-stat"><b>${(S.sessions?.cards || []).filter(s => s.active).length}</b><span>active sessions</span></div><div class="command-stat"><b>${catalog.models.length}</b><span>catalog models</span></div><div class="command-stat"><b>${S.feed.length}</b><span>audit events</span></div>`
+  const active = (S.agents?.agents || []).filter(agent => ['busy', 'working', 'active'].includes(agent.status))
+  const lead = active[0] || (S.agents?.agents || [])[0]
+  const leadProject = lead?.projectId || S.selectedRoom || rooms[0]?.id || 'no room selected'
+  const selectedPack = catalog.agentPacks?.find(pack => pack.id === S.commandSelection.packId) || catalog.agentPacks?.[0]
+  $('command-now').innerHTML = `<div class="command-now-copy"><span class="eyebrow">OPERATOR SIGNAL</span><strong>${esc(lead ? `${lead.name} has the floor.` : 'The floor is quiet.')}</strong><p>${esc(lead ? `${leadProject} · ${lead.status || 'live'} · route the next move when the evidence is ready.` : 'Give a concrete brief a room and a runtime. Quorum will keep the handoff inspectable.')}</p></div><div class="command-now-context"><span>current stance</span><b>${esc(selectedPack?.label || 'choose a pack')}</b><small>${esc(selectedPack?.role || 'waiting for a task')}</small></div><div id="command-quick-actions" class="command-quick-actions"><button type="button" data-quick-pack="scout" data-quick-task="Map the relevant code, docs, history, and evidence before anyone edits.">map the ground</button><button type="button" data-quick-pack="review" data-quick-task="Find correctness, security, and maintainability risks with focused proof.">find the risk</button><button type="button" data-quick-pack="qa" data-quick-task="Exercise the current product and report reproducible failures with exact evidence.">shake the build</button></div>`
   renderAgentWorkbench(catalog, rooms)
-  box.innerHTML = catalog.runtimes.map(runtime => `<article class="command-card ${runtime.available ? 'ready' : 'offline'}"><div class="pet-mini ${esc(runtime.id)}">✦</div><div class="command-card-copy"><h3>${esc(runtime.label)} <span>${runtime.available ? 'ready' : 'offline'}</span></h3><p>${esc(runtime.kind)} · ${esc(runtime.capabilities.join(' · '))}</p><small>${runtime.authReady ? 'auth available via local environment' : 'auth not reported / optional'}</small></div><button type="button" data-command-launch="${esc(runtime.id)}" ${runtime.available && runtime.command && rooms.length ? '' : 'disabled'}>preview launch</button></article>`).join('')
+  renderOperatorConsole()
+  renderConnectionMap()
+  box.innerHTML = catalog.runtimes.map(runtime => `<article class="command-card ${runtime.available ? 'ready' : 'offline'} ${S.commandSelection.runtimeId === runtime.id ? 'selected' : ''}" data-command-runtime="${esc(runtime.id)}" tabindex="0" title="Select ${esc(runtime.label)} as the next route"><div class="pet-mini ${esc(runtime.id)}" aria-hidden="true">${esc(runtime.id.slice(0, 2).toUpperCase())}</div><div class="command-card-copy"><h3>${esc(runtime.label)} <span>${runtime.available ? 'ready' : 'offline'}</span></h3><p>${esc(runtime.kind)} · ${esc(runtime.capabilities.join(' · '))}</p><small>${runtime.authReady ? 'auth available via local environment' : 'auth not reported / optional'}</small></div><button type="button" data-command-launch="${esc(runtime.id)}" ${runtime.available && runtime.command && rooms.length ? '' : 'disabled'}>preview launch</button></article>`).join('')
+  const selectRuntime = runtimeId => {
+    S.commandSelection.runtimeId = runtimeId
+    const runtimeSelect = $('agent-runtime')
+    if (runtimeSelect?.querySelector(`option[value="${CSS.escape(runtimeId)}"]`)) runtimeSelect.value = runtimeId
+    renderCommand()
+  }
+  for (const card of box.querySelectorAll('[data-command-runtime]')) {
+    card.onclick = event => { if (!event.target.closest('button')) selectRuntime(card.dataset.commandRuntime) }
+    card.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectRuntime(card.dataset.commandRuntime) } }
+  }
   for (const button of box.querySelectorAll('[data-command-launch]')) button.onclick = () => {
+    S.commandSelection.runtimeId = button.dataset.commandLaunch
     const roomId = S.selectedRoom || rooms[0]?.id
     if (!roomId) return
     send({ type: 'command.preview', action: 'launch', runtimeId: button.dataset.commandLaunch, roomId })
@@ -283,7 +326,167 @@ function renderCommand() {
     $('command-confirm').onclick = () => send({ type: 'command.execute', action: 'launch', runtimeId: button.dataset.commandLaunch, roomId, confirm: true })
     $('command-cancel').onclick = () => { $('command-actions').innerHTML = ''; $('command-preview').textContent = 'action cancelled' }
   }
+  for (const button of document.querySelectorAll('[data-quick-pack]')) button.onclick = () => {
+    S.commandSelection.packId = button.dataset.quickPack
+    const task = $('agent-task')
+    if (task) task.value = button.dataset.quickTask
+    renderCommand()
+    $('agent-task')?.focus()
+  }
   if (S.commandPreview) { $('command-preview').textContent = S.commandPreview.summary; $('command-actions').innerHTML = `<button type="button" id="command-confirm">confirm action</button>`; $('command-confirm').onclick = () => send({ type: 'command.execute', ...S.commandPreview, confirm: true }) }
+}
+
+async function hydrateOperatorRegistry(force = false) {
+  if (S.operatorLoading || (S.operatorRegistry && !force)) return
+  S.operatorLoading = true
+  renderOperatorConsole()
+  try {
+    const paths = ['/api/workspaces', '/api/tools', '/api/mcp', '/api/agent-control/doctor']
+    const responses = await Promise.all(paths.map(path => fetch(path)))
+    const payloads = await Promise.all(responses.map(async response => {
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+      return data
+    }))
+    S.operatorRegistry = { workspaces: payloads[0], tools: payloads[1], mcp: payloads[2], doctor: payloads[3], checkedAt: Date.now() }
+  } catch (error) {
+    S.operatorRegistry = { error: error.message, checkedAt: Date.now() }
+  } finally {
+    S.operatorLoading = false
+    renderOperatorConsole()
+  }
+}
+
+function registryRow(label, ready, detail, flag = '') {
+  return `<div class="registry-row ${ready ? 'ready' : 'offline'}"><span class="node-signal"></span><span><b>${esc(label)}</b><small>${esc(detail || 'not reported')}</small></span>${flag ? `<em>${esc(flag)}</em>` : ''}</div>`
+}
+
+function renderOperatorConsole() {
+  const surface = $('operator-surface')
+  const tabs = $('operator-tabs')
+  if (!surface || !tabs) return
+  for (const button of tabs.querySelectorAll('[data-operator-tab]')) {
+    const selected = button.dataset.operatorTab === S.operatorTab
+    button.classList.toggle('on', selected)
+    button.setAttribute('aria-selected', String(selected))
+    button.onclick = () => { S.operatorTab = button.dataset.operatorTab; renderOperatorConsole() }
+  }
+  const refresh = $('operator-refresh')
+  if (refresh && !refresh.dataset.wired) { refresh.dataset.wired = '1'; refresh.onclick = () => hydrateOperatorRegistry(true) }
+  if (S.operatorLoading && !S.operatorRegistry) { surface.innerHTML = '<div class="empty">reading local registries…</div>'; return }
+  const registry = S.operatorRegistry || {}
+  if (registry.error) { surface.innerHTML = `<div class="operator-alert"><b>Registry unavailable</b><span>${esc(registry.error)}</span></div>`; return }
+  const workspaces = registry.workspaces?.workspaces || registry.workspaces?.rooms || []
+  const tools = registry.tools?.tools || []
+  const mcps = registry.mcp?.servers || registry.mcp?.mcp || []
+  const doctor = registry.doctor || {}
+  const sessions = S.sessions?.cards || []
+  const agents = S.agents?.agents || []
+  const pending = (S.agentControl?.actions || []).filter(action => action.status === 'pending-approval')
+  const problemMissions = (S.missions?.missions || []).filter(mission => ['blocked', 'failed'].includes(mission.status))
+
+  if (S.operatorTab === 'attention') {
+    const notices = [
+      ...pending.map(action => ({ tone: 'warn', title: `${action.action} needs approval`, detail: action.id, action })),
+      ...problemMissions.map(mission => ({ tone: 'bad', title: mission.title, detail: `mission ${mission.status}` })),
+      ...(doctor.blockers || []).map(blocker => ({ tone: 'warn', title: 'Provider blocker', detail: typeof blocker === 'string' ? blocker : blocker.detail || blocker.message })),
+    ]
+    surface.innerHTML = `<div class="operator-summary"><div><b>${agents.filter(agent => ['busy','working','active'].includes(agent.status)).length}</b><span>working agents</span></div><div><b>${pending.length}</b><span>approvals</span></div><div><b>${problemMissions.length}</b><span>blocked runs</span></div><div><b>${workspaces.length}</b><span>workspaces</span></div></div><div class="operator-notices">${notices.length ? notices.map(item => `<article class="operator-notice ${item.tone}"><span class="node-signal"></span><div><b>${esc(item.title)}</b><small>${esc(item.detail || '')}</small></div>${item.action ? `<button type="button" data-console-approve="${esc(item.action.id)}">approve</button><button type="button" data-console-cancel="${esc(item.action.id)}">cancel</button>` : ''}</article>`).join('') : '<div class="operator-clear"><span class="node-signal"></span><div><b>No intervention required</b><small>Live runs and local services have not raised an operator gate.</small></div></div>'}</div>`
+  } else if (S.operatorTab === 'agents') {
+    const profiles = agents.length ? agents : (S.catalog?.agentPacks || []).map(pack => ({ sessionId: `pack:${pack.id}`, name: pack.label, status: 'ready', projectId: 'route when assigned', summary: pack.summary }))
+    surface.innerHTML = `<div class="operator-grid">${profiles.map(agent => `<button type="button" class="operator-profile" data-console-agent="${esc(agent.sessionId || agent.id)}"><span class="profile-mark">${esc((agent.name || 'AG').slice(0, 2).toUpperCase())}</span><span><b>${esc(agent.name || agent.role || 'agent')}</b><small>${esc(agent.summary || agent.projectId || 'available for a bounded task')}</small></span><em>${esc(agent.status || 'idle')}</em></button>`).join('') || '<div class="empty">No agent profiles reported.</div>'}</div>`
+  } else if (S.operatorTab === 'workspaces') {
+    surface.innerHTML = `<div class="operator-grid workspace-grid">${workspaces.map(room => `<article class="operator-workspace"><div><b>${esc(room.label || room.name || room.id)}</b><small>${esc(room.path || room.cwd || '')}</small></div><span>${room.sessionCount ?? room.sessions?.length ?? 0} sessions · ${room.missionCount ?? room.missions?.length ?? 0} missions</span><div><button type="button" data-console-room="${esc(room.id)}">focus</button><button type="button" data-console-terminal="${esc(room.id)}">terminal</button></div></article>`).join('') || '<div class="empty">No workspace registry entries.</div>'}</div>`
+  } else if (S.operatorTab === 'tools') {
+    const providers = doctor.providers?.catalog || doctor.providers || doctor.registry || []
+    surface.innerHTML = `<div class="registry-columns"><div><div class="section-label">TOOLS</div>${tools.map(tool => registryRow(tool.name || tool.id, tool.connected ?? tool.available, `${tool.risk || 'local'} · ${(tool.capabilities || []).join(', ')}`, tool.approval ? 'approval' : '')).join('') || '<div class="empty-sm">—</div>'}</div><div><div class="section-label">MCP + PROVIDERS</div>${mcps.map(item => registryRow(item.name || item.id, item.connected ?? item.available, item.detail || item.command || 'configured')).join('')}${providers.slice(0, 12).map(item => registryRow(item.label || item.name || item.id, item.ready ?? item.available, item.detail || item.authReference || item.state || '')).join('')}</div></div>`
+  } else {
+    surface.innerHTML = `<div class="operator-feed">${[...S.feed].slice(-24).reverse().map(item => `<div><span>${esc(item.type || item.kind || 'event')}</span><b>${esc(item.detail || item.message || item.summary || '')}</b><small>${esc(item.at || item.time || '')}</small></div>`).join('') || '<div class="empty">No audit events yet.</div>'}</div>`
+  }
+  for (const button of surface.querySelectorAll('[data-console-approve],[data-console-cancel]')) button.onclick = async () => {
+    const id = button.dataset.consoleApprove || button.dataset.consoleCancel
+    await controlPost(`/api/agent-control/actions/${encodeURIComponent(id)}/${button.dataset.consoleApprove ? 'approve' : 'cancel'}`)
+  }
+  for (const button of surface.querySelectorAll('[data-console-room]')) button.onclick = () => { selectDeckProject(button.dataset.consoleRoom); setView('office') }
+  for (const button of surface.querySelectorAll('[data-console-terminal]')) button.onclick = () => {
+    const room = workspaces.find(item => item.id === button.dataset.consoleTerminal)
+    if (!room) return
+    $('drawer').classList.remove('collapsed')
+    send({ type: 'pty.create', profile: 'shell', cwd: room.path || room.cwd, projectId: room.id, cols: 120, rows: 30 })
+  }
+  for (const button of surface.querySelectorAll('[data-console-agent]')) button.onclick = () => {
+    const id = button.dataset.consoleAgent
+    const session = sessions.find(item => item.id === id || item.sessionId === id)
+    if (session) { selectSession(session.file, session.agent, session.cwd); setView('radar') }
+    else { S.commandSelection.packId = id.replace('pack:', ''); renderCommand(); $('agent-task')?.focus() }
+  }
+}
+
+function connectionRecord(id, label, state, detail, action = '') {
+  const normalized = state === 'ready' || state === 'connected' ? 'ready' : state === 'reachable' ? 'reachable' : state === 'unknown' ? 'unknown' : 'offline'
+  return `<div class="connection-row ${normalized}" data-connection-id="${esc(id)}"><span class="connection-dot"></span><span class="connection-copy"><b>${esc(label)}</b><small>${esc(detail)}</small></span><span class="connection-state">${esc(normalized)}</span>${action ? `<button type="button" class="connection-action" data-connection-action="${esc(action)}" title="${esc(action)}">${action === 'sync' ? 'sync' : 'probe'}</button>` : ''}</div>`
+}
+
+function renderConnectionMap() {
+  const box = $('connection-map')
+  if (!box) return
+  const catalog = S.catalog
+  const runtime = id => catalog?.runtimes?.find(item => item.id === id)
+  const service = id => S.services?.[id]
+  const openclaw = S.openclaw || service('openclaw') || {}
+  const mem = S.memoryBridge?.claudeMem || {}
+  const obs = S.memoryBridge?.obsidian || {}
+  const rows = [
+    connectionRecord('claude-mem', 'claude-mem', mem.state || (mem.configured ? 'unknown' : 'offline'), mem.reachable ? `${mem.endpoint || '/health'} · ${mem.latencyMs ?? '—'}ms` : (mem.error || 'loopback service unavailable'), 'probe'),
+    connectionRecord('obsidian', 'Obsidian vault', obs.state || (obs.configured ? 'ready' : 'offline'), obs.writable ? `${obs.writeScope} · writable` : (obs.vault || 'vault not found'), 'sync'),
+    connectionRecord('codex', 'Codex', runtime('codex')?.available ? 'ready' : 'offline', runtime('codex')?.available ? 'managed launch available' : 'CLI not found on Quorum PATH'),
+    connectionRecord('claude', 'Claude', runtime('claude')?.available ? 'ready' : 'offline', runtime('claude')?.available ? 'managed launch available' : 'CLI not found on Quorum PATH'),
+    connectionRecord('hermes', 'Hermes gateway', service('hermes')?.up ? 'ready' : 'offline', service('hermes')?.up ? `port ${service('hermes').port}` : 'gateway not detected'),
+    connectionRecord('openclaw', 'OpenClaw', openclaw.connectionState || (openclaw.up ? 'reachable' : 'offline'), openclaw.connectionState === 'connected' ? `port ${openclaw.port || 18789} · authenticated` : openclaw.connectionState === 'auth-required' || openclaw.authState === 'required' ? `port ${openclaw.port || 18789} · auth required · credential reference only` : openclaw.up ? `port ${openclaw.port || 18789} · ${openclaw.connectionState || 'reachable'}` : 'optional adapter offline', 'probe'),
+  ]
+  const ready = rows.filter(row => row.includes('connection-row ready')).length
+  box.innerHTML = `<div class="connection-summary"><b>${ready}/${rows.length}</b><span>live paths</span><small>${mem.checkedAt ? `checked ${rel(new Date(mem.checkedAt).getTime())} ago` : 'awaiting probe'}</small></div>${rows.join('')}`
+  const refresh = $('connection-refresh')
+  if (refresh && !refresh.dataset.wired) {
+    refresh.dataset.wired = '1'
+    refresh.onclick = () => refreshMemoryBridge()
+  }
+  for (const button of box.querySelectorAll('[data-connection-action]')) {
+    button.onclick = () => {
+      if (button.closest('[data-connection-id]')?.dataset.connectionId === 'openclaw') {
+        button.disabled = true
+        fetch('/api/openclaw/connect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then(() => fetch('/api/openclaw/status')).then(response => response.json()).then(status => { S.openclaw = status; renderConnectionMap(); renderDeck() }).catch(error => { $('artifact-status').textContent = error.message }).finally(() => { button.disabled = false })
+        return
+      }
+      button.dataset.connectionAction === 'sync' ? syncMemoryBridge() : refreshMemoryBridge()
+    }
+  }
+}
+
+async function refreshMemoryBridge() {
+  const refresh = $('connection-refresh')
+  if (refresh) refresh.disabled = true
+  try {
+    const response = await fetch('/api/memory/status')
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || 'memory probe failed')
+    S.memoryBridge = data
+    renderMemory(); renderConnectionMap()
+  } catch (error) { $('artifact-status').textContent = error.message } finally { if (refresh) refresh.disabled = false }
+}
+
+async function syncMemoryBridge() {
+  const status = $('artifact-status')
+  try {
+    status.textContent = 'syncing index and bridge…'
+    const result = await postJson('/api/memory/sync', {})
+    S.artifacts = result.artifacts
+    S.memoryBridge = result.bridge
+    S.artifactResults = null
+    const bridgeLabel = result.sync?.ok ? `bridge +${result.sync.newItems || 0} new` : `bridge ${result.bridge.claudeMem.state}`
+    status.textContent = `indexed ${result.artifacts.stats.total} artifacts · ${bridgeLabel}`
+    renderMemory(); renderMemoryRing(); renderConnectionMap()
+  } catch (error) { status.textContent = error.message }
 }
 
 function renderAgentWorkbench(catalog, rooms) {
@@ -294,16 +497,18 @@ function renderAgentWorkbench(catalog, rooms) {
   const runtimeSelect = $('agent-runtime')
   const modelSelect = $('agent-model')
   if (!packs.length) { form.innerHTML = '<div class="empty">agent packs unavailable</div>'; return }
-  const previousPack = packSelect.value
+  const previousPack = S.commandSelection.packId || packSelect.value
   packSelect.innerHTML = packs.map(pack => `<option value="${esc(pack.id)}">${esc(pack.label)} · ${esc(pack.role)}</option>`).join('')
   packSelect.value = packs.some(pack => pack.id === previousPack) ? previousPack : packs[0].id
+  S.commandSelection.packId = packSelect.value
   const pack = packs.find(item => item.id === packSelect.value) || packs[0]
   const candidates = catalog.runtimes.filter(runtime => pack.runtimes?.includes(runtime.id) && runtime.command && runtime.id !== 'shell')
   const ready = candidates.filter(runtime => runtime.available)
   const runtimeChoices = ready.length ? ready : candidates
-  const oldRuntime = runtimeSelect.value
+  const oldRuntime = S.commandSelection.runtimeId || runtimeSelect.value
   runtimeSelect.innerHTML = runtimeChoices.map(runtime => `<option value="${esc(runtime.id)}">${esc(runtime.label)}${runtime.available ? '' : ' · offline'}</option>`).join('')
   runtimeSelect.value = runtimeChoices.some(runtime => runtime.id === oldRuntime) ? oldRuntime : runtimeChoices[0]?.id || ''
+  S.commandSelection.runtimeId = runtimeSelect.value
   const runtimeId = runtimeSelect.value
   const options = (pack.models || []).filter(model => model.provider === runtimeId)
   if (!options.length) options.push({ id: `${runtimeId}:auto`, label: `${runtimeId} · runtime default`, provider: runtimeId, model: 'auto', available: true })
@@ -311,8 +516,8 @@ function renderAgentWorkbench(catalog, rooms) {
   modelSelect.innerHTML = options.map(model => `<option value="${esc(model.id)}">${esc(model.label)}</option>`).join('')
   modelSelect.value = options.some(model => model.id === oldModel) ? oldModel : options[0].id
   $('agent-brief').innerHTML = `<strong>${esc(pack.summary)}</strong><span>${esc(pack.gates.join(' · '))}</span><small>role ${esc(pack.role)} · pack contract ${pack.promptAvailable ? 'loaded' : 'missing'}</small>`
-  packSelect.onchange = () => renderCommand()
-  runtimeSelect.onchange = () => renderCommand()
+  packSelect.onchange = () => { S.commandSelection.packId = packSelect.value; renderCommand() }
+  runtimeSelect.onchange = () => { S.commandSelection.runtimeId = runtimeSelect.value; renderCommand() }
   form.onsubmit = event => {
     event.preventDefault()
     const roomId = S.selectedRoom || rooms[0]?.id
@@ -618,6 +823,61 @@ $('room-spawn-actions').addEventListener('click', e => {
 })
 
 /* ── 3D command deck ───────────────────────────────────── */
+function renderCityControls(model) {
+  const index = $('city-index'), search = $('city-search'), filter = $('city-filter'), toggle = $('city-list-toggle')
+  if (!index || !search || !filter || !toggle) return
+  const entities = [...(model.buildings || []), ...(model.characters || []), ...(model.workers || [])]
+  index._cityEntities = new Map(entities.map(item => [item.id, item]))
+  const paint = () => {
+    const query = search.value.trim().toLowerCase(), kind = filter.value
+    const visible = entities.filter(item => (kind === 'all' || item.entityType === kind) && (!query || `${item.label} ${item.projectId || ''} ${item.kind || ''}`.toLowerCase().includes(query))).slice(0, 120)
+    const markup = visible.map(item => `<button type="button" data-city-entity="${esc(item.id)}"><span class="node-signal"></span><b>${esc(item.label)}</b><small>${esc(item.entityType)} · ${esc(item.state || item.status || 'monitoring')}</small></button>`).join('') || '<div class="empty-sm">No matching city entities.</div>'
+    if (index.dataset.signature !== markup) { index.innerHTML = markup; index.dataset.signature = markup }
+  }
+  if (!search.dataset.wired) {
+    search.dataset.wired = '1'; search.oninput = paint; filter.onchange = paint
+    index.onclick = event => { const button = event.target.closest('[data-city-entity]'); if (!button) return; const item = index._cityEntities?.get(button.dataset.cityEntity); focusCityEntity(button.dataset.cityEntity); if (item) selectCityEntity(item) }
+    toggle.onclick = () => { const hidden = index.classList.toggle('hidden'); toggle.setAttribute('aria-expanded', String(!hidden)) }
+  }
+  paint()
+}
+
+function selectCityEntity(entity) {
+  if (entity.entityType === 'building' && entity.projectId) selectDeckProject(entity.projectId)
+  else if (entity.entityType === 'agent' && entity.sessionId) selectDeckAgent(entity.sessionId)
+  else if (entity.entityType === 'infrastructure') {
+    S.deckSelection = { kind: 'infrastructure', id: entity.id }
+    $('deck-detail-kind').textContent = entity.district || 'infrastructure'
+    $('deck-detail').innerHTML = `<b>${esc(entity.label)}</b><div class="kv"><div>state <b>${esc(entity.status || 'monitoring')}</b></div>${entity.connectionState ? `<div>connection <b>${esc(entity.connectionState)}</b></div>` : ''}${entity.authState ? `<div>auth <b>${esc(entity.authState)}</b></div>` : ''}${entity.port ? `<div>loopback <b>127.0.0.1:${esc(entity.port)}</b></div>` : ''}</div>`
+    if (entity.id === 'building:gateway:openclaw') {
+      const connected = entity.connectionState === 'connected'
+      $('deck-actions').innerHTML = `<button type="button" id="openclaw-refresh">refresh status</button><button type="button" id="openclaw-preview-restart" ${connected ? '' : 'disabled'}>preview gateway restart</button><span class="hint">${entity.authState === 'required' ? 'credentials stay in the gateway · Quorum stores only the environment reference' : connected ? 'mutating gateway actions require confirmation' : 'authenticate the gateway before mutating actions'}</span>`
+      $('openclaw-refresh').onclick = async () => { await fetch('/api/openclaw/connect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); const response = await fetch('/api/openclaw/status'); S.openclaw = await response.json(); renderConnectionMap(); renderDeck() }
+      $('openclaw-preview-restart').onclick = () => previewOpenClawAction('gateway.restart', { reason: 'operator request from Agent City' })
+    } else $('deck-actions').innerHTML = '<span class="hint">read-only infrastructure status</span>'
+  }
+  else if (entity.entityType === 'process') {
+    S.deckSelection = { kind: 'process', id: entity.id }
+    $('deck-detail-kind').textContent = entity.kind || 'process'
+    $('deck-detail').innerHTML = `<b>${esc(entity.label)}</b><div class="kv"><div>pid <b>${esc(entity.pid)}</b></div><div>state <b>${esc(entity.state)}</b></div><div>ownership <b>${esc(entity.ownership)}</b></div></div>`
+    $('deck-actions').innerHTML = entity.ownership === 'user-owned' || entity.ownership === 'quorum-launched' ? `<button type="button" data-process-preview="pause" data-pid="${esc(entity.pid)}">pause</button><button type="button" data-process-preview="terminate" data-pid="${esc(entity.pid)}" class="danger">terminate</button>` : '<span class="hint">protected · privileged approval required</span>'
+    for (const button of $('deck-actions').querySelectorAll('[data-process-preview]')) button.onclick = () => previewProcessAction(button.dataset.pid, button.dataset.processPreview)
+  }
+}
+
+async function previewProcessAction(pid, action) {
+  try { const result = await postJson('/api/process-actions/preview', { pid: Number(pid), action, reason: 'operator request from Agent City' }); $('deck-actions').innerHTML = `<div class="process-preview"><span>${esc(result.preview.action)} ${esc(result.preview.target.name)}?</span><button type="button" id="process-confirm">confirm</button><button type="button" id="process-cancel">cancel</button></div>`; $('process-confirm').onclick = async () => { await postJson('/api/process-actions/confirm', { previewId: result.preview.id }); $('deck-actions').innerHTML = '<span class="hint">action sent and audited</span>' }; $('process-cancel').onclick = () => { $('deck-actions').innerHTML = '<span class="hint">action cancelled</span>' } } catch (error) { $('deck-actions').innerHTML = `<span class="warn">${esc(error.message)}</span>` }
+}
+
+async function previewOpenClawAction(method, input = {}) {
+  try {
+    const result = await postJson('/api/openclaw/actions/preview', { method, params: input.params || {}, reason: input.reason || 'operator request from Agent City' })
+    $('deck-actions').innerHTML = `<div class="process-preview"><span>${esc(method)}?</span><button type="button" id="openclaw-confirm">confirm</button><button type="button" id="openclaw-cancel">cancel</button></div>`
+    $('openclaw-confirm').onclick = async () => { await postJson('/api/openclaw/actions/confirm', { previewId: result.preview.id }); $('deck-actions').innerHTML = '<span class="hint">gateway action sent and audited</span>' }
+    $('openclaw-cancel').onclick = () => { $('deck-actions').innerHTML = '<span class="hint">gateway action cancelled</span>' }
+  } catch (error) { $('deck-actions').innerHTML = `<span class="warn">${esc(error.message)}</span>` }
+}
+
 function renderDeck() {
   const space = $('deck-space')
   const nodes = $('deck-nodes')
@@ -648,17 +908,26 @@ function renderDeck() {
     deckStat('memory', S.memory?.ledger?.counts ? `${S.memory.ledger.counts.pending} pending` : '—'),
     deckStat('websocket', ws?.readyState === 1 ? 'live' : 'wait'),
   ].join('')
+  const cityModel = S.city || { buildings: rooms.map((room, index) => ({ id: `building:${room.id}`, entityType: 'building', projectId: room.id, label: room.label, status: room.active ? 'active' : 'monitoring', index, sessionCount: sessions.filter(item => item.projectId === room.id).length })), characters: agents.map(agent => ({ id: `agent:${agent.sessionId}`, entityType: 'agent', label: agent.name, state: agent.status || 'monitoring', projectId: agent.projectId, sessionId: agent.sessionId })), workers: [] }
+  updateAgentCity(cityModel, { onSelect: selectCityEntity })
+  renderCityControls(cityModel)
+  $('city-live-label').textContent = `${cityModel.buildings?.length || 0} buildings · ${cityModel.characters?.length || 0} agents · ${cityModel.workers?.length || 0} workers`
 
-  const roomRadiusX = Math.max(180, Math.min(w * .38, 420))
-  const roomRadiusY = Math.max(100, Math.min(h * .31, 220))
-  const roomNodes = rooms.map((room, i) => {
-    const angle = (i / Math.max(1, rooms.length)) * Math.PI * 2 - Math.PI / 2
+  const rankedRooms = [...rooms].sort((a, b) => Number(b.active) - Number(a.active) || sessions.filter(s => s.projectId === b.id).length - sessions.filter(s => s.projectId === a.id).length)
+  const visibleRooms = rankedRooms.slice(0, Math.min(16, rankedRooms.length))
+  const roomNodes = visibleRooms.map((room, i) => {
+    const inner = i < Math.min(8, visibleRooms.length)
+    const band = inner ? visibleRooms.slice(0, 8) : visibleRooms.slice(8)
+    const bandIndex = inner ? i : i - 8
+    const angle = (bandIndex / Math.max(1, band.length)) * Math.PI * 2 - Math.PI / 2 + (inner ? 0 : .18)
+    const roomRadiusX = Math.max(inner ? 170 : 260, Math.min(w * (inner ? .27 : .4), inner ? 285 : 430))
+    const roomRadiusY = Math.max(inner ? 92 : 150, Math.min(h * (inner ? .2 : .34), inner ? 145 : 235))
     const x = Math.cos(angle) * roomRadiusX
     const y = Math.sin(angle) * roomRadiusY
     const z = room.active ? 105 : 35 + (i % 3) * 12
     const selected = S.deckSelection.kind === 'project' && S.deckSelection.id === room.id
     const cards = sessions.filter(s => s.projectId === room.id)
-    return `<div class="deck-node project ${room.active ? 'active' : ''} ${selected ? 'selected' : ''}" data-kind="project" data-id="${esc(room.id)}" style="--x:${x}px;--y:${y}px;--z:${z}px">
+    return `<div class="deck-node project ${room.active ? 'active' : ''} ${selected ? 'selected' : ''}" data-kind="project" data-id="${esc(room.id)}" tabindex="0" style="--x:${x}px;--y:${y}px;--z:${z}px">
       <div class="node-top"><span class="node-signal"></span><span class="node-title">${esc(room.label)}</span></div>
       <div class="node-meta">${cards.length} session${cards.length === 1 ? '' : 's'} · ${esc(room.agents?.join(', ') || 'idle')}</div>
     </div>`
@@ -671,29 +940,39 @@ function renderDeck() {
     const x = Math.cos(angle) * agentRadiusX
     const y = Math.sin(angle) * agentRadiusY
     const selected = S.deckSelection.kind === 'agent' && S.deckSelection.id === agent.sessionId
-    return `<div class="deck-node agent ${agent.status === 'busy' ? 'busy' : ''} ${selected ? 'selected' : ''}" data-kind="agent" data-id="${esc(agent.sessionId)}" style="--x:${x}px;--y:${y}px;--z:150px">
+    return `<div class="deck-node agent ${agent.status === 'busy' ? 'busy' : ''} ${selected ? 'selected' : ''}" data-kind="agent" data-id="${esc(agent.sessionId)}" tabindex="0" style="--x:${x}px;--y:${y}px;--z:150px">
       <div class="node-top"><span class="node-signal"></span><span class="node-title">${esc(agent.name)}</span></div>
       <div class="node-meta">${esc(agent.projectId || 'unassigned')} · ${esc(agent.status || 'idle')}</div>
     </div>`
   }).join('')
 
-  nodes.innerHTML = roomNodes + agentNodes
-  for (const node of nodes.querySelectorAll('.deck-node')) {
-    node.onclick = () => {
+  nodes.innerHTML = roomNodes + agentNodes + (rooms.length > visibleRooms.length ? `<button type="button" class="deck-more" data-deck-more>${rooms.length - visibleRooms.length} more rooms<br><small>open workspace index</small></button>` : '')
+  const activateDeckNode = (node, doubleClick = false) => {
+    if (!node) return
+    if (!doubleClick) {
       if (node.dataset.kind === 'project') selectDeckProject(node.dataset.id)
       else selectDeckAgent(node.dataset.id)
+      return
     }
-    node.ondblclick = () => {
-      if (node.dataset.kind === 'project') {
-        const card = sessions.find(s => s.projectId === node.dataset.id && s.active) || sessions.find(s => s.projectId === node.dataset.id)
-        if (card) { selectSession(card.file, card.agent, card.cwd); setView('radar') }
-        else selectDeckProject(node.dataset.id)
-      } else {
-        selectChat(node.dataset.id)
-        setView('office')
-      }
+    if (node.dataset.kind === 'project') {
+      const card = sessions.find(s => s.projectId === node.dataset.id && s.active) || sessions.find(s => s.projectId === node.dataset.id)
+      if (card) { selectSession(card.file, card.agent, card.cwd); setView('radar') }
+      else selectDeckProject(node.dataset.id)
+    } else {
+      selectChat(node.dataset.id)
+      setView('office')
     }
   }
+  nodes.onclick = event => activateDeckNode(event.target.closest('.deck-node'))
+  nodes.ondblclick = event => activateDeckNode(event.target.closest('.deck-node'), true)
+  nodes.onkeydown = event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      activateDeckNode(event.target.closest('.deck-node'))
+    }
+  }
+  nodes.querySelector('[data-deck-more]')?.addEventListener('click', event => { event.stopPropagation(); S.operatorTab = 'workspaces'; setView('command') })
+  // Delegation keeps the live matrix clickable through collector refreshes.
   $('deck-core').onclick = () => setView('radar')
   renderDeckDetail()
   renderDeckSessions()
@@ -739,7 +1018,7 @@ function renderDeckDetail() {
     const cards = (S.sessions?.cards || []).filter(c => c.projectId === room.id)
     kind.textContent = 'PROJECT'
     detail.innerHTML = `<div class="kv">${row('name', esc(room.label))}${row('status', room.active ? '<span style="color:var(--green)">occupied</span>' : 'idle')}${row('sessions', cards.length)}${row('cwd', `<code>${esc(room.cwd)}</code>`)}</div><p class="room-live-sum">${esc(room.summary || 'No active summary.')}</p>`
-    actions.innerHTML = '<button data-deck-action="seat" data-profile="claude">+ claude</button><button data-deck-action="seat" data-profile="codex">+ codex</button><button data-deck-action="office">open room</button>'
+    actions.innerHTML = '<button data-deck-action="open-project">open folder</button><button data-deck-action="reveal-project">reveal</button><button data-deck-action="seat" data-profile="claude">+ claude</button><button data-deck-action="seat" data-profile="codex">+ codex</button><button data-deck-action="office">open room</button>'
   } else {
     const agent = (S.agents?.agents || []).find(a => a.sessionId === selected.id)
     if (!agent) return
@@ -754,10 +1033,20 @@ function renderDeckDetail() {
         send({ type: 'pty.create', profile: button.dataset.profile, cwd: S.selectedCwd, projectId: S.selectedProjectId, cols: 120, rows: 30 })
       }
       if (button.dataset.deckAction === 'office') setView('office')
+      if (button.dataset.deckAction === 'open-project' || button.dataset.deckAction === 'reveal-project') projectAction(selected.id, button.dataset.deckAction === 'reveal-project' ? 'reveal' : 'open')
       if (button.dataset.deckAction === 'chat') { selectChat(selected.id); setView('office') }
       if (button.dataset.deckAction === 'radar') setView('radar')
     }
   }
+}
+
+async function projectAction(id, action) {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(id)}/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || `${action} project failed`)
+    $('deck-detail')?.insertAdjacentHTML('beforeend', `<small class="action-confirmation">${action === 'reveal' ? 'revealed in Finder' : 'opened in the default app'}</small>`)
+  } catch (error) { $('deck-detail')?.insertAdjacentHTML('beforeend', `<small class="action-error">${esc(error.message)}</small>`) }
 }
 
 function renderDeckSessions() {
@@ -964,7 +1253,7 @@ function renderProcs() {
     </div>`).join('')
   for (const b of $('top-procs').querySelectorAll('.kill'))
     b.onclick = () => {
-      if (confirm(`SIGTERM ${b.dataset.name} (pid ${b.dataset.pid})?`))
+      if (confirm(`Stop ${b.dataset.name} (pid ${b.dataset.pid})? Quorum will send SIGTERM to this tracked AI process.`))
         send({ type: 'proc.kill', pid: +b.dataset.pid })
     }
 }
@@ -1193,6 +1482,7 @@ function renderMemory() {
   const rows = []
   rows.push(row('policy', esc(m.policy || 'review-first')))
   rows.push(row('source', `${m.source?.localOnly ? 'loopback' : 'CHECK'} ${esc(m.source?.url || '—')}`))
+  rows.push(row('Quorum bridges', `${S.memoryBridge?.claudeMem?.configured ? 'claude-mem ready' : 'claude-mem off'} · ${S.memoryBridge?.obsidian?.configured ? 'Obsidian ready' : 'vault unavailable'}`))
   rows.push(row('allowlist', esc((m.projects || []).join(', ') || '—')))
   rows.push(row('ledger', `${counts.total} total · cursor ${esc(m.ledger?.cursorHighestId ?? 0)}`))
   rows.push(row('inbox', `${m.inbox?.observationMarkers ?? 0} markers · ${m.inbox?.exists ? 'present' : 'missing'}`))
@@ -1700,12 +1990,250 @@ function renderArchive() {
   }
 }
 
+/* ── durable missions ───────────────────────────────────────────────── */
+async function postJson(url, body) {
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+  return data
+}
+
+function missionProgress(mission) {
+  const tasks = mission?.tasks || []
+  const complete = tasks.filter(task => task.status === 'completed').length
+  return tasks.length ? Math.round(complete / tasks.length * 100) : mission?.status === 'completed' ? 100 : 0
+}
+
+function renderMissionForm() {
+  const room = $('mission-room')
+  const runtime = $('mission-runtime')
+  if (!room || !runtime) return
+  const rooms = S.projects?.rooms || []
+  const roomValue = room.value
+  room.innerHTML = rooms.map(item => `<option value="${esc(item.id)}">${esc(item.label)}</option>`).join('') || '<option value="">no project rooms</option>'
+  if (rooms.some(item => item.id === roomValue)) room.value = roomValue
+  const runtimes = (S.catalog?.runtimes || S.runtimes || []).filter(item => item.command && item.id !== 'shell')
+  const runtimeValue = runtime.value
+  runtime.innerHTML = runtimes.map(item => `<option value="${esc(item.id)}">${esc(item.label || item.id)}${item.available === false ? ' · offline' : ''}</option>`).join('') || '<option value="">no runtimes detected</option>'
+  if (runtimes.some(item => item.id === runtimeValue)) runtime.value = runtimeValue
+}
+
+function renderMissions() {
+  const list = $('mission-list')
+  const detail = $('mission-detail')
+  if (!list || !detail) return
+  renderMissionForm()
+  const missionsList = S.missions?.missions || []
+  $('mission-count').textContent = `${missionsList.length} durable`
+  const form = $('mission-form')
+  if (form && !form.dataset.wired) {
+    form.dataset.wired = '1'
+    form.onsubmit = async event => {
+      event.preventDefault()
+      const status = $('mission-form-status')
+      try {
+        status.textContent = 'creating…'
+        const template = form.querySelector('input[name="mission-template"]:checked')?.value || 'build'
+        const title = $('mission-title').value
+        const objective = $('mission-objective').value
+        const firstTask = $('mission-task').value || title
+        const common = { roomId: $('mission-room').value || null, runtimeId: $('mission-runtime').value || null }
+        const tasks = template === 'single'
+          ? [{ id: 'execute', title: firstTask, description: objective, packId: 'builder', ...common }]
+          : template === 'audit'
+            ? [{ id: 'inspect', title: firstTask, description: `Inspect current state and collect evidence. ${objective}`, packId: 'scout', ...common }, { id: 'verify', title: 'Verify findings', description: 'Reproduce the important findings and record exact evidence.', dependsOn: ['inspect'], packId: 'qa', ...common }]
+            : [{ id: 'discover', title: firstTask, description: `Map the relevant system before editing. ${objective}`, packId: 'scout', ...common }, { id: 'build', title: 'Implement the objective', description: objective, dependsOn: ['discover'], packId: 'builder', ...common }, { id: 'verify', title: 'Test and document evidence', description: 'Run focused and full checks, then record the result and remaining gates.', dependsOn: ['build'], packId: 'qa', ...common }]
+        const result = await postJson('/api/missions', { title, objective, tasks })
+        S.missionSelection = result.mission.id
+        $('mission-title').value = ''; $('mission-objective').value = ''; $('mission-task').value = ''
+        status.textContent = 'mission created'
+        renderMissions()
+      } catch (error) { status.textContent = error.message }
+    }
+  }
+  if (!missionsList.length) {
+    list.innerHTML = '<div class="empty">No missions yet. Create one with a concrete objective and a first task.</div>'
+    detail.innerHTML = '<div class="empty">Select a mission to inspect its task graph.</div>'
+    return
+  }
+  if (!S.missionSelection || !missionsList.some(item => item.id === S.missionSelection)) S.missionSelection = missionsList[0].id
+  list.innerHTML = missionsList.map(mission => `<button type="button" class="mission-row ${mission.id === S.missionSelection ? 'selected' : ''}" data-mission-id="${esc(mission.id)}">
+    <span class="mission-status ${esc(mission.status)}"></span><span class="mission-row-copy"><b>${esc(mission.title)}</b><small>${esc(mission.objective)}</small></span><span class="mission-progress">${missionProgress(mission)}%</span>
+  </button>`).join('')
+  for (const row of list.querySelectorAll('[data-mission-id]')) row.onclick = () => { S.missionSelection = row.dataset.missionId; S.missionPreview = null; renderMissions() }
+  const mission = missionsList.find(item => item.id === S.missionSelection)
+  if (!mission) return
+  const ready = new Set((mission.tasks || []).filter(task => task.status === 'queued' && task.dependsOn.every(dep => (mission.tasks || []).find(item => item.id === dep)?.status === 'completed')).map(task => task.id))
+  const managedRuns = S.runtimeRuns?.runs || []
+  const missionRooms = [...new Set((mission.tasks || []).map(task => task.roomId).filter(Boolean))]
+  const missionAgents = [...new Set((mission.tasks || []).map(task => task.agentId || task.packId).filter(Boolean))]
+  detail.innerHTML = `<div class="mission-detail-head"><span class="eyebrow">${esc(mission.status)}</span><h2>${esc(mission.title)}</h2><p>${esc(mission.objective)}</p><div class="progress-line"><span style="width:${missionProgress(mission)}%"></span></div><small>${missionProgress(mission)}% complete · updated ${esc(mission.updatedAt)}</small><div class="mission-evidence"><span><b>${mission.tasks?.length || 0}</b> tasks</span><span><b>${missionAgents.length}</b> agents</span><span><b>${mission.artifacts?.length || 0}</b> artifacts</span><span><b>${mission.events?.length || 0}</b> events</span></div><div class="mission-context">${missionRooms.map(id => `<button type="button" data-mission-room="${esc(id)}">${esc((S.projects?.rooms || []).find(room => room.id === id)?.label || id)}</button>`).join('')}</div></div>
+    <div class="mission-tasks"><div class="section-label">TASK GRAPH</div>${(mission.tasks || []).map(task => { const run = managedRuns.find(item => item.missionId === mission.id && item.taskId === task.id && !['completed', 'failed', 'cancelled'].includes(item.status)); const controls = run ? `<span class="task-live">${esc(run.status)} · ${esc(run.phase)}</span><div class="runtime-controls"><button type="button" data-runtime-action="${run.status === 'paused' ? 'resume' : 'pause'}" data-runtime-run="${esc(run.runId)}">${run.status === 'paused' ? 'resume' : 'pause'}</button><button type="button" data-runtime-action="cancel" data-runtime-run="${esc(run.runId)}">cancel</button></div>` : ''; return `<article class="mission-task ${esc(task.status)}"><div><span class="mission-status ${esc(task.status)}"></span><b>${esc(task.title)}</b></div><small>${esc(task.description || 'No task brief')}</small><div class="mission-task-meta">${task.agentId ? esc(task.agentId) : 'unassigned'} · ${task.runtimeId ? esc(task.runtimeId) : 'runtime on dispatch'}${task.dependsOn.length ? ` · waits for ${esc(task.dependsOn.join(', '))}` : ''}</div>${ready.has(task.id) ? `<button type="button" data-task-preview="${esc(task.id)}">preview dispatch</button>` : task.status === 'working' ? (controls || '<span class="task-live">running in a managed session</span>') : ''}</article>` }).join('') || '<div class="empty-sm">No tasks defined.</div>'}</div>
+    <div class="mission-events"><div class="section-label">RECENT EVENTS</div>${(mission.events || []).slice(-8).reverse().map(event => `<div><span>${esc(event.type)}</span><small>${esc(event.detail)} · ${esc(event.at)}</small></div>`).join('') || '<div class="empty-sm">—</div>'}</div>
+    ${S.missionPreview?.missionId === mission.id ? `<div class="mission-preview"><div class="section-label">DISPATCH PREVIEW</div><p>${esc(S.missionPreview.preview.summary)}</p><code>${esc(S.missionPreview.preview.launch?.shellCommand || S.missionPreview.preview.command || 'guarded runtime launch')}</code><button type="button" id="mission-confirm-dispatch">confirm dispatch</button><button type="button" id="mission-cancel-dispatch" class="danger">cancel</button></div>` : ''}`
+  for (const button of detail.querySelectorAll('[data-task-preview]')) button.onclick = () => previewMissionTask(mission, button.dataset.taskPreview)
+  for (const button of detail.querySelectorAll('[data-runtime-action]')) button.onclick = () => runtimeAction(button.dataset.runtimeRun, button.dataset.runtimeAction)
+  for (const button of detail.querySelectorAll('[data-mission-room]')) button.onclick = () => { selectDeckProject(button.dataset.missionRoom); setView('office') }
+  $('mission-confirm-dispatch')?.addEventListener('click', () => dispatchMissionTask(mission, S.missionPreview?.taskId, true))
+  $('mission-cancel-dispatch')?.addEventListener('click', () => { S.missionPreview = null; renderMissions() })
+}
+
+async function previewMissionTask(mission, taskId) {
+  const task = mission.tasks.find(item => item.id === taskId)
+  if (!task) return
+  try {
+    const runtimeId = task.runtimeId || $('mission-runtime')?.value || 'codex'
+    const result = await postJson(`/api/missions/${encodeURIComponent(mission.id)}/tasks/${encodeURIComponent(taskId)}/dispatch`, { runtimeId, managed: ['claude', 'codex'].includes(runtimeId), roomId: task.roomId || $('mission-room')?.value, packId: task.packId || 'builder', modelRef: task.modelRef || undefined, task: task.description || task.title })
+    S.missionPreview = { missionId: mission.id, taskId, preview: result.preview }
+    renderMissions()
+  } catch (error) { $('mission-form-status').textContent = error.message }
+}
+
+async function dispatchMissionTask(mission, taskId, confirm) {
+  const task = mission.tasks.find(item => item.id === taskId)
+  if (!task) return
+  try {
+    const runtimeId = task.runtimeId || $('mission-runtime')?.value || 'codex'
+    const result = await postJson(`/api/missions/${encodeURIComponent(mission.id)}/tasks/${encodeURIComponent(taskId)}/dispatch`, { runtimeId, managed: ['claude', 'codex'].includes(runtimeId), roomId: task.roomId || $('mission-room')?.value, packId: task.packId || 'builder', modelRef: task.modelRef || undefined, task: task.description || task.title, confirm })
+    S.missionPreview = null
+    S.missionSelection = result.mission?.id || mission.id
+    renderMissions()
+  } catch (error) { $('mission-form-status').textContent = error.message }
+}
+
+async function runtimeAction(runId, action) {
+  try { await postJson(`/api/runtime-runs/${encodeURIComponent(runId)}/${action}`, {}); renderMissions() }
+  catch (error) { $('mission-form-status').textContent = error.message }
+}
+
+/* ── indexed memory ring ────────────────────────────────────────────── */
+function artifactList() { return S.artifactResults !== null ? S.artifactResults : S.artifacts?.entries || [] }
+
+function renderArtifactDetail() {
+  const box = $('artifact-detail')
+  if (!box) return
+  const item = S.artifactDetail
+  $('artifact-detail-source').textContent = item ? item.source : ''
+  if (!item) { box.innerHTML = '<div class="empty">Select an indexed artifact. Previews are bounded and secret-redacted.</div>'; return }
+  box.innerHTML = `<div class="artifact-detail-head"><span class="eyebrow">${esc(item.sourceLabel || item.source)}</span><h2>${esc(item.title)}</h2><p>${esc(item.path)}</p><small>${esc(item.updatedAt)} · ${item.bytes} bytes${item.truncated ? ' · preview clipped' : ''}</small>${item.openable === false ? '<small>Protected artifact: opening is disabled.</small>' : '<div class="artifact-actions"><button type="button" id="artifact-open">open file</button><button type="button" id="artifact-reveal">reveal</button></div>'}</div><pre id="artifact-content"></pre>`
+  $('artifact-content').textContent = item.content || item.summary || ''
+  $('artifact-open')?.addEventListener('click', () => artifactAction(item.id, 'open'))
+  $('artifact-reveal')?.addEventListener('click', () => artifactAction(item.id, 'reveal'))
+}
+
+async function openArtifact(id) {
+  try {
+    const response = await fetch(`/api/artifacts/${encodeURIComponent(id)}`)
+    const item = await response.json()
+    if (!response.ok) throw new Error(item.error || 'artifact unavailable')
+    S.artifactDetail = item
+    renderMemoryRing()
+  } catch (error) { $('artifact-status').textContent = error.message }
+}
+
+async function artifactAction(id, action) {
+  try {
+    const response = await fetch(`/api/artifacts/${encodeURIComponent(id)}/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || `${action} failed`)
+    $('artifact-status').textContent = action === 'reveal' ? 'revealed in Finder' : 'opened in the default app'
+  } catch (error) { $('artifact-status').textContent = error.message }
+}
+
+function renderMemoryRing() {
+  const ring = $('memory-ring')
+  const resultsBox = $('artifact-results')
+  if (!ring || !resultsBox) return
+  // The ring is a navigational overview, not the whole corpus. Keeping the
+  // orbit sparse gives each recent artifact a real hit target; the complete
+  // bounded result list remains below for exhaustive search.
+  const entries = artifactList().slice(0, 12)
+  const stats = S.artifacts?.stats || { total: entries.length, bySource: {} }
+  $('artifact-count').textContent = `${stats.total || entries.length} indexed · ${stats.truncated ? 'partial' : 'full index'}`
+  const sourceSelect = $('artifact-source')
+  if (sourceSelect) {
+    const selectedSource = sourceSelect.value
+    const sources = (S.artifacts?.roots || []).filter(root => (stats.bySource?.[root.id] || 0) > 0)
+    sourceSelect.innerHTML = '<option value="">all sources</option>' + sources.map(root => `<option value="${esc(root.id)}">${esc(root.label)}</option>`).join('')
+    sourceSelect.value = sources.some(root => root.id === selectedSource) ? selectedSource : ''
+  }
+  const count = Math.max(1, entries.length)
+  ring.innerHTML = `<div class="ring-center"><span class="eyebrow">LOCAL RECALL</span><strong>${stats.total || 0}</strong><small>${Object.entries(stats.bySource || {}).map(([key, value]) => `${esc(key)} ${value}`).join(' · ')}</small><span data-ring-message>${esc(S.artifactDetail ? `${S.artifactDetail.sourceLabel || S.artifactDetail.source} · ${S.artifactDetail.title}` : 'hover a node to inspect its trail')}</span></div>${entries.map((entry, index) => `<button type="button" class="artifact-node source-${esc(entry.source)} ${S.artifactDetail?.id === entry.id ? 'selected' : ''}" style="--i:${index};--count:${count}" data-artifact-id="${esc(entry.id)}" title="${esc(entry.path)}"><span>${esc(entry.source.slice(0, 3).toUpperCase())}</span><b>${esc(entry.title.slice(0, 30))}</b><small>${rel(entry.mtimeMs)}</small></button>`).join('')}`
+  const recallOutput = $('memory-recall-output')
+  if (recallOutput) {
+    recallOutput.classList.toggle('hidden', !S.recallContext)
+    recallOutput.textContent = S.recallContext ? `RECALLED CONTEXT · ${S.recallContext.query}\n\n${S.recallContext.context || 'No matching long-term context.'}` : ''
+  }
+  const ringMessage = ring.querySelector('[data-ring-message]')
+  for (const node of ring.querySelectorAll('[data-artifact-id]')) {
+    const entry = entries.find(item => item.id === node.dataset.artifactId)
+    node.onmouseenter = () => { if (ringMessage && entry) ringMessage.textContent = `${entry.sourceLabel || entry.source} · ${entry.title}` }
+    node.onmouseleave = () => { if (ringMessage) ringMessage.textContent = S.artifactDetail ? `${S.artifactDetail.sourceLabel || S.artifactDetail.source} · ${S.artifactDetail.title}` : 'hover a node to inspect its trail' }
+    node.title = `${entry?.path || 'artifact'} · click to preview · double-click to open`
+    node.onclick = () => openArtifact(node.dataset.artifactId)
+    node.ondblclick = () => artifactAction(node.dataset.artifactId, 'open')
+  }
+  resultsBox.innerHTML = entries.length ? entries.map(entry => `<button type="button" class="artifact-result ${S.artifactDetail?.id === entry.id ? 'selected' : ''}" data-artifact-id="${esc(entry.id)}"><span class="source-mark source-${esc(entry.source)}">${esc(entry.source.slice(0, 3).toUpperCase())}</span><span><b>${esc(entry.title)}</b><small>${esc(entry.relativePath)} · ${esc(entry.summary || 'indexed artifact')}</small></span><time>${rel(entry.mtimeMs)}</time></button>`).join('') : '<div class="empty">No indexed artifacts yet. Reindex after starting Quorum.</div>'
+  for (const item of resultsBox.querySelectorAll('[data-artifact-id]')) {
+    item.onclick = () => openArtifact(item.dataset.artifactId)
+    item.ondblclick = () => artifactAction(item.dataset.artifactId, 'open')
+  }
+  renderArtifactDetail()
+  const searchForm = $('artifact-search-form')
+  if (searchForm && !searchForm.dataset.wired) {
+    searchForm.dataset.wired = '1'
+    searchForm.onsubmit = async event => {
+      event.preventDefault()
+      const status = $('artifact-status')
+      try {
+        status.textContent = 'searching…'
+        const query = $('artifact-query').value
+        const source = $('artifact-source').value
+        const response = await fetch(`/api/artifacts/search?q=${encodeURIComponent(query)}&source=${encodeURIComponent(source)}`)
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.error || 'search failed')
+        S.artifactResults = data.results || []
+        S.artifactDetail = null
+        S.recallContext = null
+        status.textContent = `${data.total} matches`
+        renderMemoryRing()
+      } catch (error) { status.textContent = error.message }
+    }
+  }
+  const reindex = $('artifact-reindex')
+  if (reindex && !reindex.dataset.wired) {
+    reindex.dataset.wired = '1'
+    reindex.onclick = async () => {
+      try { reindex.disabled = true; $('artifact-status').textContent = 'indexing…'; const response = await postJson('/api/artifacts/reindex', {}); S.artifacts = response; S.artifactResults = null; $('artifact-status').textContent = `indexed ${response.stats.total} files`; renderMemoryRing() } catch (error) { $('artifact-status').textContent = error.message } finally { reindex.disabled = false }
+    }
+  }
+  const sync = $('memory-sync')
+  if (sync && !sync.dataset.wired) { sync.dataset.wired = '1'; sync.onclick = syncMemoryBridge }
+  const recall = $('memory-recall')
+  if (recall && !recall.dataset.wired) {
+    recall.dataset.wired = '1'
+    recall.onclick = async () => {
+      const status = $('artifact-status')
+      const query = $('artifact-query').value.trim() || 'operator'
+      try {
+        recall.disabled = true; status.textContent = 'recalling bounded context…'
+        const response = await fetch(`/api/memory/recall?q=${encodeURIComponent(query)}`)
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.error || 'recall failed')
+        S.recallContext = data
+        status.textContent = `${(data.context || '').length} characters recalled · ${data.bridge.claudeMem.state}`
+        renderMemoryRing()
+      } catch (error) { status.textContent = error.message } finally { recall.disabled = false }
+    }
+  }
+}
+
 function renderAll() {
   renderRuntimes()
   setView(S.view)
   renderTopbar(); renderSessions(); renderSystem(); renderServices(); renderProcs(); renderFeed()
   renderOffice(); renderRoomDetail(); renderDeck(); renderCommand(); renderAgentControl()
-  renderBoard(); renderComposio(); renderMemory(); renderAgents(); renderAvatars()
+  renderBoard(); renderComposio(); renderMemory(); renderConnectionMap(); renderAgents(); renderAvatars(); renderMissions(); renderMemoryRing()
   renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderArchive()
   renderEdition()
 }

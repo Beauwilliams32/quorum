@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { loadConfig, loadRuntimes } from '../config.js'
 import { detectRuntimes } from './adapters.js'
+import { providerCatalog } from './provider-registry.js'
 
 const timeoutMs = 1500
 
@@ -79,12 +80,15 @@ export async function runDoctor({ home = os.homedir(), env = process.env } = {})
   const routeReady = Boolean(endpointResult.ok && models.length)
   const launchd = launchdHealth(home)
   const safety = machineSafety(home)
+  const providerEntries = providerCatalog({ runtimes })
   let safeEndpoint = 'configured'
   try { safeEndpoint = new URL(endpoint).origin } catch { /* keep opaque status */ }
   return {
     ok: runtimes.some(item => item.available) && (!ollama || !ollama.available || routeReady || endpointResult.reason === 'unreachable'),
     runtimes,
     providers: {
+      catalog: providerEntries,
+      contractVersion: 1,
       ollama: {
         cliInstalled: Boolean(ollama?.available),
         endpoint: safeEndpoint,
