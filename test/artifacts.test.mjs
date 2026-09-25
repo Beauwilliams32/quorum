@@ -4,9 +4,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { buildArtifactIndex, openArtifact, openDirectory, readArtifact, searchArtifacts } from '../src/artifacts.js'
+import { scratchDir } from './helpers/scratch.mjs'
 
-test('artifact index maps vault and agent files without exposing its search corpus', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-artifacts-'))
+test('artifact index maps vault and agent files without exposing its search corpus', t => {
+  const root = scratchDir(t, 'quorum-artifacts-')
   const vault = path.join(root, 'vault')
   const codex = path.join(root, 'codex')
   fs.mkdirSync(vault, { recursive: true })
@@ -24,8 +25,8 @@ test('artifact index maps vault and agent files without exposing its search corp
   assert.doesNotMatch(opened.content, /«redacted:sk-…»/)
 })
 
-test('protected credential artifacts cannot be opened or revealed', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-artifacts-protected-'))
+test('protected credential artifacts cannot be opened or revealed', t => {
+  const root = scratchDir(t, 'quorum-artifacts-protected-')
   fs.writeFileSync(path.join(root, 'auth.json'), '{"token":"do-not-open"}\n', 'utf8')
   const state = buildArtifactIndex({ roots: [{ id: 'codex', label: 'Codex', path: root }], persist: false })
   const auth = state.entries.find(entry => entry.title === 'auth.json')
@@ -33,10 +34,10 @@ test('protected credential artifacts cannot be opened or revealed', () => {
   assert.throws(() => openArtifact(auth.id), /protected/)
 })
 
-test('symlinked artifacts cannot escape the indexed root when opened', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-artifacts-link-'))
+test('symlinked artifacts cannot escape the indexed root when opened', t => {
+  const root = scratchDir(t, 'quorum-artifacts-link-')
   const linkedPath = path.join(root, 'linked.txt')
-  const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-artifacts-outside-')), 'outside.txt')
+  const outside = path.join(scratchDir(t, 'quorum-artifacts-outside-'), 'outside.txt')
   fs.writeFileSync(linkedPath, 'inside', 'utf8')
   fs.writeFileSync(outside, 'outside', 'utf8')
   const state = buildArtifactIndex({ roots: [{ id: 'workspace', label: 'Workspace', path: root }], persist: false })
@@ -46,8 +47,8 @@ test('symlinked artifacts cannot escape the indexed root when opened', () => {
   assert.throws(() => openArtifact(linked.id), /outside an indexed root/)
 })
 
-test('overlapping roots do not duplicate the same artifact', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-artifacts-overlap-'))
+test('overlapping roots do not duplicate the same artifact', t => {
+  const root = scratchDir(t, 'quorum-artifacts-overlap-')
   const nested = path.join(root, 'nested')
   fs.mkdirSync(nested)
   fs.writeFileSync(path.join(nested, 'artifact.md'), '# One copy\n', 'utf8')
@@ -59,8 +60,8 @@ test('overlapping roots do not duplicate the same artifact', () => {
   assert.equal(state.entries[0].source, 'custom')
 })
 
-test('project folders can only be opened inside an indexed root', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-project-root-'))
+test('project folders can only be opened inside an indexed root', t => {
+  const root = scratchDir(t, 'quorum-project-root-')
   const project = path.join(root, 'project')
   fs.mkdirSync(project)
   let invocation

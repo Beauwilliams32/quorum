@@ -2,14 +2,15 @@
 'use strict'
 
 import { drawCharacter, drawMascot, drawRoom, LOD, ROOM_FLOOR } from './art.js'
-import { focusCityEntity, updateAgentCity } from './city.js'
+import { token, tokenAlpha } from './theme.js'
+import { renderHqView, wireHq } from './hq.js'
 
 // Rendered height of an avatar sprite: the SVG is drawn at 1.2× its width.
 const AVATAR_H = Math.round(LOD.avatar * 1.2)
 
 const S = {
   processes: null, sessions: null, services: null, openclaw: null, system: null, projects: null,
-  tasks: null, composio: null, agents: null, memory: null, artifacts: null, missions: null, city: null, standingJobs: null,
+  tasks: null, composio: null, agents: null, memory: null, artifacts: null, missions: null, city: null, standingJobs: null, hq: null,
   hist: [], feed: [], selected: null, follow: true,
   terms: new Map(), activeTerm: null,
   // ?view= wins over the remembered view, so a view is linkable and a wedged
@@ -57,6 +58,28 @@ const DEFAULT_MODEL_OPTIONS = [
 ]
 const currentModelOptions = () => S.modelOptions.length ? S.modelOptions : DEFAULT_MODEL_OPTIONS
 
+/* ── the 3D city, loaded on demand ─────────────────────────
+ * three.js is 2.0 MB of the cockpit's 2.4 MB of vendored JS and only the Agent
+ * City on the Deck uses it, so it is fetched the first time the Deck is opened
+ * rather than on every page load. Callers go through `withCity`, which runs the
+ * callback now if the module is already here and after the import if it is not;
+ * if the import fails the city stays absent and says so, and the rest of the
+ * Deck still renders. */
+let cityApi = null
+let cityLoad = null
+function withCity(fn) {
+  if (cityApi) return fn(cityApi)
+  cityLoad ||= import('./city.js').then(module => { cityApi = module; return module }).catch(error => {
+    cityLoad = null
+    console.warn('[quorum] the 3D city could not be loaded', error)
+    const label = document.getElementById('city-live-label')
+    if (label) label.textContent = '3D city unavailable — the list below is the full model'
+    return null
+  })
+  cityLoad.then(module => { if (module) fn(module) })
+  return undefined
+}
+
 const $ = id => document.getElementById(id)
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
 const rel = ms => {
@@ -67,6 +90,56 @@ const rel = ms => {
   return `${s / 86400 | 0}d`
 }
 const gb = mb => (mb / 1024).toFixed(1) + 'G'
+
+/* ── age labels that stay honest ───────────────────────────
+ * "3m ago" is a function of the wall clock, not of anything the server sends.
+ * The cockpit used to repaint it by accident — every collector tick re-ran
+ * every renderer — and that storm is gone: `State#publish` sends nothing at all
+ * when a key's payload is byte-identical, and a transcript that has stopped
+ * being written has a constant `mtimeMs` forever. Left alone, a session that
+ * went quiet four minutes ago would sit at "1m" for the rest of the day, which
+ * is a cockpit claiming to be fresher than it is — the one lie this surface
+ * must never tell.
+ *
+ * So every age is rendered through `relLabel`, which carries the ABSOLUTE
+ * instant in `data-rel` (and the full local timestamp in `title`, so the truth
+ * is one hover away even between ticks), and one ticker repaints the text.
+ * `relTick` writes only when the rendered text actually changed, so a label
+ * reading "4h" costs nothing until the hour turns — this is a repaint of a few
+ * text nodes, not a return of the render storm. */
+const REL_TICK_MS = 10_000
+const relSuffix = el => el.dataset.relSuffix || ''
+function relLabel(ms, { tag = 'span', cls = '', suffix = '' } = {}) {
+  const at = Number(ms)
+  const open = `<${tag}${cls ? ` class="${cls}"` : ''}`
+  if (!Number.isFinite(at) || at <= 0) return `${open}>—</${tag}>`
+  const stamp = new Date(at)
+  return `${open} data-rel="${at}"${suffix ? ` data-rel-suffix="${esc(suffix)}"` : ''}` +
+    ` datetime="${stamp.toISOString()}" title="${esc(stamp.toLocaleString())}">${rel(at)}${suffix}</${tag}>`
+}
+function relTick() {
+  for (const el of document.querySelectorAll('[data-rel]')) {
+    const at = Number(el.dataset.rel)
+    if (!Number.isFinite(at)) continue
+    const next = rel(at) + relSuffix(el)
+    if (el.textContent !== next) el.textContent = next
+  }
+}
+setInterval(relTick, REL_TICK_MS)
+
+/* Rebuilding a list into the same markup costs an innerHTML parse, a layout,
+ * and a re-wire of every handler inside it — for no visible change. Most
+ * collector ticks move one number in one row, or nothing at all, so the hot
+ * containers write through here and re-wire only when the markup really moved.
+ *
+ * Only for containers whose renderer is their sole writer: the remembered
+ * markup would go stale under anyone else's innerHTML. */
+function writeIfChanged(element, html) {
+  if (!element || element.__quorumHtml === html) return false
+  element.__quorumHtml = html
+  element.innerHTML = html
+  return true
+}
 
 /* ── websocket ─────────────────────────────────────────── */
 let ws
@@ -82,59 +155,94 @@ function connect() {
 }
 const send = m => { if (ws?.readyState === 1) ws.send(JSON.stringify(m)) }
 
+/* ── server state: snapshots, patches, resync ──────────────
+ * The server used to push the whole value of every key on every collector
+ * tick. It now sends a full value once and per-property patches after that,
+ * each naming the version it applies to. `wire` holds this client's copy of
+ * the last full value per key — patches are applied to it and the result is
+ * handed to exactly the same per-key logic a full update always used, so the
+ * rendering path below does not know or care which arrived.
+ *
+ * A patch whose `from` does not match the version we hold means we missed a
+ * message. That is never swallowed: the client says so in the event feed and
+ * in the console, then asks the server for the whole key back. */
+const wire = {}
+const wireVersion = {}
+const resyncPending = new Set()
+
+function requestResync(key, why) {
+  if (resyncPending.has(key)) return
+  resyncPending.add(key)
+  console.warn(`[quorum] "${key}" state is out of sync (${why}); requesting a full copy`)
+  S.feed.push({ kind: 'sync', text: `${key} state fell behind (${why}); asked the server for a full copy`, ts: Date.now() })
+  if (S.feed.length > 200) S.feed.shift()
+  paint('renderFeed')
+  send({ type: 'state.resync', key })
+}
+
+/** Apply one row-array delta in place, preserving order unless the server sent a new one. */
+function applyRows(list, delta) {
+  const byId = new Map((Array.isArray(list) ? list : []).map(row => [String(row?.id), row]))
+  for (const id of delta.remove || []) byId.delete(String(id))
+  for (const row of delta.upsert || []) byId.set(String(row.id), row)
+  return delta.order ? delta.order.map(id => byId.get(String(id))).filter(Boolean) : [...byId.values()]
+}
+
 const handlers = {
   snapshot(m) {
-    S.processes = m.data.processes || null
-    S.sessions = m.data.sessions || null
-    S.services = m.data.services || null
-    S.openclaw = m.data.openclaw || null
-    S.projects = m.data.projects || null
-    S.tasks = m.data.tasks || null
-    S.composio = m.data.composio || null
-    S.agents = m.data.agents || null
-    S.memory = m.data.memory || null
-    S.artifacts = m.data.artifacts || null
-    S.missions = m.data.missions || null
-    S.agentControl = m.data.agentControl || null
-    S.runtimeRuns = m.data.runtimeRuns || null
-    S.memoryBridge = m.data.memoryBridge || null
-    S.city = m.data.city || null
-    S.standingJobs = m.data.standingJobs || null
-    S.system = m.data.system?.latest || null
-    S.hist = m.data.system?.hist ? [...m.data.system.hist] : []
+    const data = m.data || {}
+    // `wire` carries the broadcast payload for keys whose stored value is
+    // heavier than what the browser is sent (processes keeps a 1200-row
+    // inventory server-side; system keeps 300 samples of history).
+    const light = m.wire || {}
+    resyncPending.clear()
+    for (const key of Object.keys(wire)) delete wire[key]
+    for (const key of new Set([...Object.keys(data), ...Object.keys(light)])) {
+      wire[key] = key in light ? light[key] : data[key]
+      wireVersion[key] = (m.versions || {})[key] ?? 0
+    }
+    S.processes = wire.processes || null
+    S.sessions = wire.sessions || null
+    S.services = wire.services || null
+    S.openclaw = wire.openclaw || null
+    S.projects = wire.projects || null
+    S.tasks = wire.tasks || null
+    S.composio = wire.composio || null
+    S.agents = wire.agents || null
+    S.memory = wire.memory || null
+    S.artifacts = wire.artifacts || null
+    S.missions = wire.missions || null
+    S.agentControl = wire.agentControl || null
+    S.runtimeRuns = wire.runtimeRuns || null
+    S.memoryBridge = wire.memoryBridge || null
+    S.city = wire.city || null
+    S.standingJobs = wire.standingJobs || null
+    S.hq = wire.hq || null
+    S.system = data.system?.latest || null
+    S.hist = data.system?.hist ? [...data.system.hist] : []
     S.feed = m.feed || []
     renderAll()
   },
   update(m) {
-    if (m.key === 'system') {
-      S.system = m.data.latest
-      S.hist.push(m.data.latest)
-      if (S.hist.length > 300) S.hist.shift()
-      renderSystem(); renderTopbar(); renderDeck()
-    } else {
-      S[m.key] = m.data
-      if (m.key === 'sessions') { renderSessions(); renderOffice(); renderRoomDetail(); renderDeck() }
-      if (m.key === 'processes') { renderTopbar(); renderProcs(); renderOffice(); renderDeck() }
-      if (m.key === 'services') { renderTopbar(); renderServices(); renderOffice(); renderDeck(); renderConnectionMap() }
-      if (m.key === 'openclaw') { S.openclaw = m.data; renderDeck(); renderConnectionMap() }
-      if (m.key === 'projects') { renderOffice(); renderRoomDetail(); renderAvatars(); renderDeck() }
-      if (m.key === 'tasks') { renderBoard(); renderTopbar(); renderAvatars(); renderDeck() }
-      if (m.key === 'composio') renderComposio()
-      if (m.key === 'agents') { renderAgents(); renderAvatars(); renderDeck() }
-      if (m.key === 'memory') { renderMemory(); renderTopbar(); renderDeck() }
-      if (m.key === 'artifacts') { S.artifactResults = null; renderMemoryRing() }
-      if (m.key === 'missions') renderMissions()
-      if (m.key === 'agentControl') renderAgentControl()
-      if (m.key === 'runtimeRuns') { renderMissions(); renderTopbar() }
-      if (m.key === 'city') renderDeck()
-      if (m.key === 'standingJobs') { renderCommand(); renderDeck() }
-      if (m.key === 'memoryBridge') { renderMemory(); renderConnectionMap() }
-    }
+    wire[m.key] = m.data
+    if (m.v != null) wireVersion[m.key] = m.v
+    resyncPending.delete(m.key)
+    applyUpdate(m.key, m.data)
+  },
+  patch(m) {
+    const base = wire[m.key]
+    if (!base || typeof base !== 'object') return requestResync(m.key, 'no local copy')
+    if (wireVersion[m.key] !== m.from) return requestResync(m.key, `expected v${m.from}, hold v${wireVersion[m.key]}`)
+    for (const prop of m.del || []) delete base[prop]
+    for (const prop of Object.keys(m.set || {})) base[prop] = m.set[prop]
+    for (const prop of Object.keys(m.rows || {})) base[prop] = applyRows(base[prop], m.rows[prop])
+    wireVersion[m.key] = m.v
+    applyUpdate(m.key, base)
   },
   event(m) {
     S.feed.push(m.item)
     if (S.feed.length > 200) S.feed.shift()
-    renderFeed()
+    paint('renderFeed')
   },
   transcript(m) {
     const box = $('transcript')
@@ -179,11 +287,11 @@ const handlers = {
       if (!c || c.locked) S.seated.delete(id)
     }
     persistSeated()
-    renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderEdition(); renderRuntimes(); renderMissions()
-    renderCommand(); renderConnectionMap()
+    paint('renderMascot', 'renderCrew', 'renderCastPicker', 'renderRoundtable', 'renderEdition', 'renderRuntimes', 'renderMissions')
+    paint('renderCommand', 'renderConnectionMap', 'renderHq')
   },
-  'command.preview'(m) { S.commandPreview = m.preview; renderCommand() },
-  'command.done'(m) { S.commandPreview = null; renderCommand(); renderFeed() },
+  'command.preview'(m) { S.commandPreview = m.preview; paint('renderCommand') },
+  'command.done'(m) { S.commandPreview = null; paint('renderCommand', 'renderFeed') },
 
   'rt.list'(m) {
     S.archive = m.recent || []
@@ -192,21 +300,21 @@ const handlers = {
     // empty table next to a terminal that is visibly spending money.
     if (m.live?.length) S.debate = m.live[0]
     else if (!S.debate && S.archive.length) S.debate = S.archive[0]
-    renderRoundtable(); renderArchive()
+    paint('renderRoundtable', 'renderArchive')
   },
 
-  'rt.update'(m) { S.debate = m.debate; renderRoundtable() },
-  'rt.turn'(m) { if (S.debate?.id === m.debateId) S.speaking = null; renderRoundtable() },
+  'rt.update'(m) { S.debate = m.debate; paint('renderRoundtable') },
+  'rt.turn'(m) { if (S.debate?.id === m.debateId) S.speaking = null; paint('renderRoundtable') },
   'rt.speaking'(m) {
     if (S.debate?.id !== m.debateId) return
     S.speaking = { speaker: m.speaker, phase: m.phase }
-    renderStage()
+    paint('renderStage')
   },
   'rt.done'(m) {
     S.debate = m.debate
     S.speaking = null
     S.archive = [m.debate, ...S.archive.filter(d => d.id !== m.debate.id)].slice(0, 8)
-    renderRoundtable(); renderArchive()
+    paint('renderRoundtable', 'renderArchive')
   },
 
   'pty.list'(m) { syncTabs(m.ptys) },
@@ -222,10 +330,102 @@ const handlers = {
   },
 }
 
+/* ── view-scoped rendering ─────────────────────────────────
+ * Every renderer below writes into exactly one view's subtree, and every view
+ * but the current one is `display:none`. Running a hidden view's renderer is a
+ * full innerHTML rebuild (and, for the Deck, a three.js scene update) that
+ * nobody can see — renderDeck and renderOffice were each doing that several
+ * times a second whatever was on screen.
+ *
+ * `paint()` runs a renderer when its view is visible and otherwise remembers
+ * it; `flushPendingRenders()` runs what the newly visible view missed, so the
+ * pixels are the same either way. Renderers not listed here — the topbar, the
+ * mascot, the edition badge, the terminal tabs — are always-visible chrome and
+ * always run.
+ *
+ * Gating the Deck also fixes a latent bug: renderDeck lays its nodes out from
+ * `deck-space.clientWidth`, which is 0 while the view is hidden, so a hidden
+ * render positioned everything for a fabricated 900px stage. */
+const RENDER_VIEW = {
+  renderCommand: 'command', renderOperatorConsole: 'command', renderConnectionMap: 'command', renderAgentControl: 'command',
+  renderOffice: 'office', renderRoomDetail: 'office', renderAvatars: 'office', renderCrew: 'office',
+  renderDeck: 'deck',
+  renderSessions: 'radar', renderSystem: 'radar', renderServices: 'radar', renderProcs: 'radar', renderFeed: 'radar',
+  renderBoard: 'board', renderComposio: 'board', renderMemory: 'board', renderAgents: 'board',
+  renderCastPicker: 'table', renderRoundtable: 'table', renderArchive: 'table', renderStage: 'table',
+  renderMissions: 'missions',
+  renderMemoryRing: 'memory',
+  renderHq: 'hq',
+}
+// Function declarations are hoisted, so this literal is safe this early and
+// keeps the whole dispatch table in one readable place.
+const RENDERERS = {
+  renderTopbar, renderEdition, renderMascot, renderRuntimes,
+  renderCommand, renderOperatorConsole, renderConnectionMap, renderAgentControl,
+  renderOffice, renderRoomDetail, renderAvatars, renderCrew,
+  renderDeck,
+  renderSessions, renderSystem, renderServices, renderProcs, renderFeed,
+  renderBoard, renderComposio, renderMemory, renderAgents,
+  renderCastPicker, renderRoundtable, renderArchive, renderStage,
+  renderMissions, renderMemoryRing, renderHq,
+}
+const pendingRenders = new Set()
+// Renders actually executed since load. Exposed for measurement, not for the UI.
+let renderCount = 0
+
+function paint(...names) {
+  for (const name of names) {
+    const view = RENDER_VIEW[name]
+    if (view && view !== S.view) { pendingRenders.add(name); continue }
+    pendingRenders.delete(name)
+    renderCount += 1
+    RENDERERS[name]()
+  }
+}
+
+function flushPendingRenders() {
+  for (const name of [...pendingRenders]) {
+    if (RENDER_VIEW[name] !== S.view) continue
+    pendingRenders.delete(name)
+    renderCount += 1
+    RENDERERS[name]()
+  }
+}
+
+/** One incoming key, one fan-out. Shared by full updates and applied patches. */
+function applyUpdate(key, data) {
+  if (key === 'system') {
+    S.system = data.latest
+    S.hist.push(data.latest)
+    if (S.hist.length > 300) S.hist.shift()
+    paint('renderSystem', 'renderTopbar', 'renderDeck')
+    return
+  }
+  S[key] = data
+  if (key === 'sessions') paint('renderSessions', 'renderOffice', 'renderRoomDetail', 'renderDeck')
+  if (key === 'processes') paint('renderTopbar', 'renderProcs', 'renderOffice', 'renderDeck')
+  if (key === 'services') paint('renderTopbar', 'renderServices', 'renderOffice', 'renderDeck', 'renderConnectionMap')
+  if (key === 'openclaw') paint('renderDeck', 'renderConnectionMap')
+  if (key === 'projects') paint('renderOffice', 'renderRoomDetail', 'renderAvatars', 'renderDeck')
+  if (key === 'tasks') paint('renderBoard', 'renderTopbar', 'renderAvatars', 'renderDeck')
+  if (key === 'composio') paint('renderComposio')
+  if (key === 'agents') paint('renderAgents', 'renderAvatars', 'renderDeck')
+  if (key === 'memory') paint('renderMemory', 'renderTopbar', 'renderDeck')
+  if (key === 'artifacts') { S.artifactResults = null; paint('renderMemoryRing') }
+  if (key === 'missions') paint('renderMissions')
+  if (key === 'agentControl') paint('renderAgentControl')
+  if (key === 'runtimeRuns') paint('renderMissions', 'renderTopbar')
+  if (key === 'city') paint('renderDeck')
+  if (key === 'standingJobs') paint('renderCommand', 'renderDeck')
+  if (key === 'memoryBridge') paint('renderMemory', 'renderConnectionMap')
+  if (key === 'hq') paint('renderHq', 'renderTopbar')
+}
+
 /* ── view toggle ───────────────────────────────────────── */
 // One map rather than a line per view: adding a view should mean adding a key,
 // not remembering to add a matching toggle call three lines down.
 const VIEWS = {
+  hq: 'view-hq',
   office: 'view-office',
   command: 'view-command',
   table: 'view-table',
@@ -243,20 +443,34 @@ function setView(view) {
   for (const [name, id] of Object.entries(VIEWS)) $(id).classList.toggle('hidden', name !== view)
   for (const b of document.querySelectorAll('#view-toggle button'))
     b.classList.toggle('on', b.dataset.view === view)
-  if (view === 'radar') renderSystem()
-  if (view === 'deck') renderDeck()
-  if (view === 'office') { renderOffice(); renderAvatars() }
-  if (view === 'command') { renderCommand(); hydrateOperatorRegistry() }
-  if (view === 'table') { renderRoundtable(); renderArchive() }
-  if (view === 'board') { renderBoard(); renderComposio(); renderAgents() }
-  if (view === 'missions') renderMissions()
-  if (view === 'memory') renderMemoryRing()
+  // The city's animation loop belongs to the Deck. Off the Deck it stops, so
+  // it is not rendering frames into a pane nobody can see.
+  if (view === 'deck') withCity(module => module.setCityRunning(true))
+  else if (cityApi) cityApi.setCityRunning(false)
+  if (view === 'radar') paint('renderSystem')
+  if (view === 'deck') paint('renderDeck')
+  if (view === 'office') paint('renderOffice', 'renderAvatars')
+  if (view === 'command') { paint('renderCommand'); hydrateOperatorRegistry() }
+  if (view === 'table') paint('renderRoundtable', 'renderArchive')
+  if (view === 'board') paint('renderBoard', 'renderComposio', 'renderAgents')
+  if (view === 'missions') paint('renderMissions')
+  if (view === 'memory') paint('renderMemoryRing')
+  if (view === 'hq') paint('renderHq')
+  // Whatever this view missed while it was hidden.
+  flushPendingRenders()
 }
 
 for (const b of document.querySelectorAll('#view-toggle button'))
   b.onclick = () => setView(b.dataset.view)
 
 document.getElementById('command-roundtable')?.addEventListener('click', () => setView('table'))
+document.getElementById('tb-hq')?.addEventListener('click', () => setView('hq'))
+
+/* ── HQ ────────────────────────────────────────────────────
+ * The company and the room live in public/hq.js; this is the seam. HQ owns
+ * its own subtree and talks to /api/hq; the `hq` state key repaints it. */
+function renderHq() { renderHqView(S) }
+wireHq({ S, rerender: () => paint('renderHq'), setView })
 
 // Apply the requested or remembered view immediately. The websocket snapshot can
 // arrive after first paint; direct links like ?view=table must not flash or stay
@@ -277,6 +491,18 @@ function renderTopbar() {
     `<span class="tb-item">${dot((g.codex || 0) > 0)}codex <b>${g.codex || 0}</b></span>` +
     `<span class="tb-item">${dot(sv.comfy?.up)}comfy${comfyDl() ? ' <b>⇣dl</b>' : ''}</span>` +
     `<span class="tb-item">${dot(S.memory?.ok)}memory <b>${S.memory?.ledger?.counts?.pending ?? '—'}</b></span>`
+  // The task counter lives in the always-visible topbar, so the topbar owns it:
+  // renderBoard only runs while the Board view is on screen.
+  // HQ chip: only what the server counted — who is working, what waits on you.
+  const hqChip = $('tb-hq')
+  if (hqChip) {
+    const t = S.hq?.ready ? S.hq.totals || {} : null
+    hqChip.classList.toggle('hidden', !t)
+    hqChip.classList.toggle('attention', Boolean(t?.pendingApprovals))
+    if (t) hqChip.innerHTML = `HQ <b>${t.working || 0}</b> working${t.pendingApprovals ? ` · <b>${t.pendingApprovals}</b> need you` : ''}`
+  }
+  const tasks = S.tasks?.counts || { pending: 0, in_progress: 0 }
+  $('tb-tasks').innerHTML = `<span class="tb-item">tasks <b>${tasks.in_progress}</b>/${tasks.in_progress + tasks.pending}</span>`
   const sys = S.system
   if (sys) {
     const pressure = sys.freeMB < 500 ? 'style="color:var(--red)"' : sys.freeMB < 1500 ? 'style="color:var(--yellow)"' : ''
@@ -288,6 +514,29 @@ function renderTopbar() {
   }
 }
 
+/* The Command view's status line.
+ *
+ * It reports only what was measured: how many catalogued runtimes actually
+ * answered, and how many project rooms were discovered. It used to end with a
+ * hardcoded claim about secrets — a sentence, not a measurement — and the
+ * stylesheet painted the whole line green unconditionally, so it read healthy
+ * at 0/6 runtimes ready. The tone IS the measurement now, and the caller sets
+ * the colour inline the way #deck-connection already does.
+ *
+ * test/operator-console.test.mjs asserts the tones and that no unmeasured
+ * claim reappears anywhere in this file. */
+function commandReadiness(catalog, rooms) {
+  const runtimes = catalog?.runtimes || []
+  const ready = runtimes.filter(runtime => runtime.available).length
+  const tone = runtimes.length === 0 ? 'unknown'
+    : ready === 0 ? 'down'
+    : ready < runtimes.length ? 'partial'
+    : 'ready'
+  return { ready, total: runtimes.length, rooms: rooms.length, tone, text: `${ready}/${runtimes.length} runtimes ready · ${rooms.length} discovered rooms` }
+}
+
+const READINESS_COLOR = { ready: 'var(--ok)', partial: 'var(--warn)', down: 'var(--error)', unknown: 'var(--muted)' }
+
 function renderCommand() {
   const box = $('command-library')
   if (!box) return
@@ -295,7 +544,9 @@ function renderCommand() {
   if (!catalog) { box.innerHTML = '<div class="empty">waiting for Quorum catalog…</div>'; return }
   const available = catalog.runtimes.filter(r => r.available).length
   const rooms = S.projects?.rooms || []
-  $('command-connection').textContent = `${available}/${catalog.runtimes.length} runtimes ready · ${rooms.length} discovered rooms · no secrets exposed`
+  const readiness = commandReadiness(catalog, rooms)
+  $('command-connection').textContent = readiness.text
+  $('command-connection').style.color = READINESS_COLOR[readiness.tone]
   $('command-pulse').innerHTML = `<div class="command-stat"><b>${rooms.length}</b><span>project rooms</span></div><div class="command-stat"><b>${(S.sessions?.cards || []).filter(s => s.active).length}</b><span>active sessions</span></div><div class="command-stat"><b>${catalog.models.length}</b><span>catalog models</span></div><div class="command-stat"><b>${S.feed.length}</b><span>audit events</span></div>`
   const active = (S.agents?.agents || []).filter(agent => ['busy', 'working', 'active'].includes(agent.status))
   const lead = active[0] || (S.agents?.agents || [])[0]
@@ -423,7 +674,7 @@ function renderOperatorConsole() {
 }
 
 function connectionRecord(id, label, state, detail, action = '') {
-  const normalized = state === 'ready' || state === 'connected' ? 'ready' : state === 'reachable' ? 'reachable' : state === 'unknown' ? 'unknown' : 'offline'
+  const normalized = state === 'ready' || state === 'connected' ? 'ready' : ['reachable', 'connecting'].includes(state) ? 'reachable' : ['auth-required', 'degraded', 'protocol-error', 'unknown'].includes(state) ? state : 'offline'
   return `<div class="connection-row ${normalized}" data-connection-id="${esc(id)}"><span class="connection-dot"></span><span class="connection-copy"><b>${esc(label)}</b><small>${esc(detail)}</small></span><span class="connection-state">${esc(normalized)}</span>${action ? `<button type="button" class="connection-action" data-connection-action="${esc(action)}" title="${esc(action)}">${action === 'sync' ? 'sync' : 'probe'}</button>` : ''}</div>`
 }
 
@@ -445,7 +696,7 @@ function renderConnectionMap() {
     connectionRecord('openclaw', 'OpenClaw', openclaw.connectionState || (openclaw.up ? 'reachable' : 'offline'), openclaw.connectionState === 'connected' ? `port ${openclaw.port || 18789} · authenticated` : openclaw.connectionState === 'auth-required' || openclaw.authState === 'required' ? `port ${openclaw.port || 18789} · auth required · credential reference only` : openclaw.up ? `port ${openclaw.port || 18789} · ${openclaw.connectionState || 'reachable'}` : 'optional adapter offline', 'probe'),
   ]
   const ready = rows.filter(row => row.includes('connection-row ready')).length
-  box.innerHTML = `<div class="connection-summary"><b>${ready}/${rows.length}</b><span>live paths</span><small>${mem.checkedAt ? `checked ${rel(new Date(mem.checkedAt).getTime())} ago` : 'awaiting probe'}</small></div>${rows.join('')}`
+  box.innerHTML = `<div class="connection-summary"><b>${ready}/${rows.length}</b><span>live paths</span><small>${mem.checkedAt ? `checked ${relLabel(new Date(mem.checkedAt).getTime(), { suffix: ' ago' })}` : 'awaiting probe'}</small></div>${rows.join('')}`
   const refresh = $('connection-refresh')
   if (refresh && !refresh.dataset.wired) {
     refresh.dataset.wired = '1'
@@ -484,7 +735,8 @@ async function syncMemoryBridge() {
     S.memoryBridge = result.bridge
     S.artifactResults = null
     const bridgeLabel = result.sync?.ok ? `bridge +${result.sync.newItems || 0} new` : `bridge ${result.bridge.claudeMem.state}`
-    status.textContent = `indexed ${result.artifacts.stats.total} artifacts · ${bridgeLabel}`
+    const blindRoots = (result.artifacts.roots || []).filter(root => root.readable === false).length
+    status.textContent = `indexed ${result.artifacts.stats.total} artifacts${blindRoots ? ` · ${blindRoots} root${blindRoots === 1 ? '' : 's'} unreadable` : ''} · ${bridgeLabel}`
     renderMemory(); renderMemoryRing(); renderConnectionMap()
   } catch (error) { status.textContent = error.message }
 }
@@ -548,7 +800,7 @@ function renderAgentControl() {
   const pending = (control.actions || []).filter(action => action.status === 'pending-approval')
   const lease = control.policy?.lease?.ttlSeconds ? `${Math.round(control.policy.lease.ttlSeconds / 60)}m lease` : 'lease active'
   box.innerHTML = `<div class="control-summary"><span><b>${runs.filter(run => run.status === 'active').length}</b> active</span><span><b>${pending.length}</b> pending</span><span>${esc(lease)}</span></div>` +
-    (runs.length ? runs.map(run => `<div class="control-run"><span class="dot ${run.status === 'active' ? 'up' : ''}"></span><span class="control-run-copy"><b>${esc(run.packId || run.runtime)} · ${esc(run.role)}</b><small>${esc(run.phase || run.status)} · ${esc(run.worktree)}</small></span><span class="control-run-actions"><small>${run.leaseExpiresAt ? rel(run.leaseExpiresAt) + ' lease' : 'closed'}</small>${run.status === 'active' ? `<button type="button" data-control-run-cancel="${esc(run.runId)}">stop</button>` : ''}${run.status === 'stale' ? `<button type="button" data-control-run-recover="${esc(run.runId)}">recover</button>` : ''}</span></div>`).join('') : '<div class="empty-sm">no claimed runs</div>') +
+    (runs.length ? runs.map(run => `<div class="control-run"><span class="dot ${run.status === 'active' ? 'up' : ''}"></span><span class="control-run-copy"><b>${esc(run.packId || run.runtime)} · ${esc(run.role)}</b><small>${esc(run.phase || run.status)} · ${esc(run.worktree)}</small></span><span class="control-run-actions"><small>${run.leaseExpiresAt ? relLabel(run.leaseExpiresAt, { suffix: ' lease' }) : 'closed'}</small>${run.status === 'active' ? `<button type="button" data-control-run-cancel="${esc(run.runId)}">stop</button>` : ''}${run.status === 'stale' ? `<button type="button" data-control-run-recover="${esc(run.runId)}">recover</button>` : ''}</span></div>`).join('') : '<div class="empty-sm">no claimed runs</div>') +
     (pending.length ? `<div class="control-pending"><b>EXTERNAL APPROVALS</b>${pending.map(action => `<div><span>${esc(action.action)} · ${esc(action.id)}</span><button type="button" data-control-approve="${esc(action.id)}">approve</button><button type="button" data-control-cancel="${esc(action.id)}">cancel</button></div>`).join('')}</div>` : '')
   for (const button of box.querySelectorAll('[data-control-approve],[data-control-cancel]')) button.onclick = async () => {
     await controlPost(`/api/agent-control/actions/${encodeURIComponent(button.dataset.controlApprove || button.dataset.controlCancel)}/${button.dataset.controlApprove ? 'approve' : 'cancel'}`)
@@ -565,22 +817,27 @@ const comfyDl = () => (S.processes?.procs || []).some(p => p.group === 'comfy' &
 function renderOffice() {
   const proj = S.projects
   if (!proj) {
-    $('team-desks').innerHTML = '<div class="empty-sm">loading team…</div>'
-    $('rooms-grid').innerHTML = '<div class="empty">loading rooms…</div>'
+    // Through writeIfChanged, not around it: these two containers are guarded,
+    // and a raw innerHTML here would leave `__quorumHtml` holding the previous
+    // room markup. The next tick with an unchanged room set would then compare
+    // equal, skip the write, and leave the Office stuck on "loading rooms…".
+    writeIfChanged($('team-desks'), '<div class="empty-sm">loading team…</div>')
+    writeIfChanged($('rooms-grid'), '<div class="empty">loading rooms…</div>')
     return
   }
 
   const DRAGGABLE_RUNTIME = new Set(['claude', 'codex', 'hermes'])
-  $('team-desks').innerHTML = (proj.team || []).map(t =>
+  const deskMarkup = (proj.team || []).map(t =>
     `<div class="desk ${t.alive ? 'alive' : 'idle'}" data-agent="${esc(t.id)}"
           ${DRAGGABLE_RUNTIME.has(t.id) ? 'draggable="true" title="drag onto a room to open a terminal there"' : ''}>
       <span class="desk-pulse"></span>
       <span class="desk-name">${esc(t.label)}</span>
       <span class="desk-count">${t.count || (t.alive ? 'up' : '—')}</span>
     </div>`).join('')
-
-  for (const el of $('team-desks').querySelectorAll('.desk[draggable]'))
-    el.ondragstart = e => e.dataTransfer.setData('text/plain', 'runtime:' + el.dataset.agent)
+  if (writeIfChanged($('team-desks'), deskMarkup)) {
+    for (const el of $('team-desks').querySelectorAll('.desk[draggable]'))
+      el.ondragstart = e => e.dataTransfer.setData('text/plain', 'runtime:' + el.dataset.agent)
+  }
 
   const rooms = proj.rooms || []
   const cfg = proj.config
@@ -594,7 +851,7 @@ function renderOffice() {
   }
   const debatingRoom = S.debate && !S.debate.endedAt ? S.debate.roomId : null
 
-  $('rooms-grid').innerHTML = rooms.map(r => {
+  const roomMarkup = rooms.map(r => {
     const mode = r.id === debatingRoom ? 'roundtable' : r.active ? 'focus' : 'idle'
     const badges = (r.agents || []).map(a =>
       `<span class="badge ${a === 'codex' ? 'cx' : a === 'hermes' ? 'hm' : 'cl'}">${a === 'codex' ? 'CX' : a === 'hermes' ? 'HM' : 'CL'}</span>`
@@ -613,10 +870,11 @@ function renderOffice() {
       ${mode === 'roundtable' ? '<span class="room-flag">roundtable in session</span>' : ''}
     </div>`
   }).join('') || setupCard(cfg)
-
-  for (const el of $('rooms-grid').querySelectorAll('.room')) {
-    el.onclick = () => selectRoom(el.dataset.id)
-    wireRoomDrop(el)
+  if (writeIfChanged($('rooms-grid'), roomMarkup)) {
+    for (const el of $('rooms-grid').querySelectorAll('.room')) {
+      el.onclick = () => selectRoom(el.dataset.id)
+      wireRoomDrop(el)
+    }
   }
 }
 
@@ -707,6 +965,12 @@ function renderCrew() {
   }
 }
 
+/* Where a locked character sends you. The funnel depends on greyed-out seats
+ * driving clicks, so the click has to land somewhere: this is the landing page
+ * that carries the current price, not a price baked into a shipped build.
+ * Swap it for the direct Gumroad product URL once that listing is published. */
+const PRO_URL = 'https://tridentsocial.net/quorum/#pricing'
+
 /* A locked character is advertised, not hidden — seeing Sable greyed out with
  * "paid to find the way it breaks" underneath is what sells the upgrade. */
 function showUpgrade(c) {
@@ -716,7 +980,8 @@ function showUpgrade(c) {
   box.className = 'rt-estimate warn'
   box.innerHTML = `<b>${esc(c.name)}</b> — ${esc(c.role)} — is part of Quorum Pro. ` +
     `The free edition seats Nib, Vex and Bolt, which is enough for a real debate. ` +
-    `Pro adds the full six-character crew and lets you write your own specialists.`
+    `Pro adds the full six-character crew and lets you write your own specialists. ` +
+    `<a class="upgrade-link" href="${PRO_URL}" target="_blank" rel="noopener noreferrer">See what Pro adds →</a>`
 }
 
 function renderEdition() {
@@ -725,8 +990,11 @@ function renderEdition() {
   const pro = S.edition?.tier === 'pro'
   el.className = 'edition ' + (pro ? 'pro' : 'free')
   el.textContent = pro ? 'PRO' : 'FREE'
+  // An expired update window is not a lockout: the badge stays PRO and the
+  // tooltip says when updates ended rather than pretending the licence is gone.
   el.title = pro
-    ? `Quorum Pro${S.edition.licence?.registeredTo ? ' — ' + S.edition.licence.registeredTo : ''}`
+    ? `Quorum Pro${S.edition.licence?.registeredTo ? ' — ' + S.edition.licence.registeredTo : ''}` +
+      (S.edition.updatesExpired && S.edition.updatesUntil ? ` — updates ended ${S.edition.updatesUntil}` : '')
     : `Free edition — ${S.edition?.reason || 'no licence'}`
 }
 
@@ -793,7 +1061,7 @@ function renderRoomDetail() {
       ${c.active ? '<span class="pulse"></span>' : '<span class="idle-dot"></span>'}
       <span class="badge ${c.agent === 'codex' ? 'cx' : 'cl'}">${c.agent === 'codex' ? 'CX' : 'CL'}</span>
       <span class="room-sess-sum">${esc(c.summary || c.id)}</span>
-      <span class="sess-time">${rel(c.mtimeMs)}</span>
+      ${relLabel(c.mtimeMs, { cls: 'sess-time' })}
     </div>`
   ).join('')
   for (const el of $('room-sessions').querySelectorAll('.room-sess'))
@@ -836,7 +1104,7 @@ function renderCityControls(model) {
   }
   if (!search.dataset.wired) {
     search.dataset.wired = '1'; search.oninput = paint; filter.onchange = paint
-    index.onclick = event => { const button = event.target.closest('[data-city-entity]'); if (!button) return; const item = index._cityEntities?.get(button.dataset.cityEntity); focusCityEntity(button.dataset.cityEntity); if (item) selectCityEntity(item) }
+    index.onclick = event => { const button = event.target.closest('[data-city-entity]'); if (!button) return; const item = index._cityEntities?.get(button.dataset.cityEntity); withCity(module => module.focusCityEntity(button.dataset.cityEntity)); if (item) selectCityEntity(item) }
     toggle.onclick = () => { const hidden = index.classList.toggle('hidden'); toggle.setAttribute('aria-expanded', String(!hidden)) }
   }
   paint()
@@ -852,7 +1120,7 @@ function selectCityEntity(entity) {
     if (entity.id === 'building:gateway:openclaw') {
       const connected = entity.connectionState === 'connected'
       $('deck-actions').innerHTML = `<button type="button" id="openclaw-refresh">refresh status</button><button type="button" id="openclaw-preview-restart" ${connected ? '' : 'disabled'}>preview gateway restart</button><span class="hint">${entity.authState === 'required' ? 'credentials stay in the gateway · Quorum stores only the environment reference' : connected ? 'mutating gateway actions require confirmation' : 'authenticate the gateway before mutating actions'}</span>`
-      $('openclaw-refresh').onclick = async () => { await fetch('/api/openclaw/connect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); const response = await fetch('/api/openclaw/status'); S.openclaw = await response.json(); renderConnectionMap(); renderDeck() }
+      $('openclaw-refresh').onclick = async () => { try { await fetch('/api/openclaw/connect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); const response = await fetch('/api/openclaw/status'); if (!response.ok) throw new Error(`OpenClaw status ${response.status}`); S.openclaw = await response.json(); renderConnectionMap(); renderDeck() } catch (error) { $('deck-actions').innerHTML = `<span class="warn">${esc(error.message)}</span>` } }
       $('openclaw-preview-restart').onclick = () => previewOpenClawAction('gateway.restart', { reason: 'operator request from Agent City' })
     } else $('deck-actions').innerHTML = '<span class="hint">read-only infrastructure status</span>'
   }
@@ -874,7 +1142,7 @@ async function previewOpenClawAction(method, input = {}) {
     const result = await postJson('/api/openclaw/actions/preview', { method, params: input.params || {}, reason: input.reason || 'operator request from Agent City' })
     $('deck-actions').innerHTML = `<div class="process-preview"><span>${esc(method)}?</span><button type="button" id="openclaw-confirm">confirm</button><button type="button" id="openclaw-cancel">cancel</button></div>`
     $('openclaw-confirm').onclick = async () => { await postJson('/api/openclaw/actions/confirm', { previewId: result.preview.id }); $('deck-actions').innerHTML = '<span class="hint">gateway action sent and audited</span>' }
-    $('openclaw-cancel').onclick = () => { $('deck-actions').innerHTML = '<span class="hint">gateway action cancelled</span>' }
+    $('openclaw-cancel').onclick = async () => { try { await postJson('/api/openclaw/actions/cancel', { previewId: result.preview.id }); $('deck-actions').innerHTML = '<span class="hint">gateway action cancelled and audited</span>' } catch (error) { $('deck-actions').innerHTML = `<span class="warn">${esc(error.message)}</span>` } }
   } catch (error) { $('deck-actions').innerHTML = `<span class="warn">${esc(error.message)}</span>` }
 }
 
@@ -899,7 +1167,7 @@ function renderDeck() {
   $('deck-pressure-label').textContent = pressure
   $('deck-pressure-label').style.color = pressureColor
   $('deck-core-stats').textContent = `${activeSessions} live · ${S.terms.size} CLI`
-  $('deck-stats').innerHTML = [
+  writeIfChanged($('deck-stats'), [
     deckStat('free', sys.freeMB == null ? '—' : gb(sys.freeMB)),
     deckStat('load', sys.load == null ? '—' : sys.load),
     deckStat('sessions', `${activeSessions}/${sessions.length}`),
@@ -907,9 +1175,9 @@ function renderDeck() {
     deckStat('rooms', String(rooms.length)),
     deckStat('memory', S.memory?.ledger?.counts ? `${S.memory.ledger.counts.pending} pending` : '—'),
     deckStat('websocket', ws?.readyState === 1 ? 'live' : 'wait'),
-  ].join('')
+  ].join(''))
   const cityModel = S.city || { buildings: rooms.map((room, index) => ({ id: `building:${room.id}`, entityType: 'building', projectId: room.id, label: room.label, status: room.active ? 'active' : 'monitoring', index, sessionCount: sessions.filter(item => item.projectId === room.id).length })), characters: agents.map(agent => ({ id: `agent:${agent.sessionId}`, entityType: 'agent', label: agent.name, state: agent.status || 'monitoring', projectId: agent.projectId, sessionId: agent.sessionId })), workers: [] }
-  updateAgentCity(cityModel, { onSelect: selectCityEntity })
+  withCity(module => module.updateAgentCity(cityModel, { onSelect: selectCityEntity }))
   renderCityControls(cityModel)
   $('city-live-label').textContent = `${cityModel.buildings?.length || 0} buildings · ${cityModel.characters?.length || 0} agents · ${cityModel.workers?.length || 0} workers`
 
@@ -946,7 +1214,7 @@ function renderDeck() {
     </div>`
   }).join('')
 
-  nodes.innerHTML = roomNodes + agentNodes + (rooms.length > visibleRooms.length ? `<button type="button" class="deck-more" data-deck-more>${rooms.length - visibleRooms.length} more rooms<br><small>open workspace index</small></button>` : '')
+  const nodesChanged = writeIfChanged(nodes, roomNodes + agentNodes + (rooms.length > visibleRooms.length ? `<button type="button" class="deck-more" data-deck-more>${rooms.length - visibleRooms.length} more rooms<br><small>open workspace index</small></button>` : ''))
   const activateDeckNode = (node, doubleClick = false) => {
     if (!node) return
     if (!doubleClick) {
@@ -971,7 +1239,8 @@ function renderDeck() {
       activateDeckNode(event.target.closest('.deck-node'))
     }
   }
-  nodes.querySelector('[data-deck-more]')?.addEventListener('click', event => { event.stopPropagation(); S.operatorTab = 'workspaces'; setView('command') })
+  // The overflow control is a fresh element only when the markup was rewritten.
+  if (nodesChanged) nodes.querySelector('[data-deck-more]')?.addEventListener('click', event => { event.stopPropagation(); S.operatorTab = 'workspaces'; setView('command') })
   // Delegation keeps the live matrix clickable through collector refreshes.
   $('deck-core').onclick = () => setView('radar')
   renderDeckDetail()
@@ -1056,10 +1325,12 @@ function renderDeckSessions() {
   const selectedProject = S.deckSelection.kind === 'project' ? S.deckSelection.id : null
   const cards = (S.sessions?.cards || []).filter(c => !selectedProject || c.projectId === selectedProject).slice(0, 20)
   count.textContent = String(cards.length)
-  box.innerHTML = cards.map(c => `<div class="deck-session" data-file="${esc(c.file)}" data-agent="${esc(c.agent)}" data-cwd="${esc(c.cwd || '')}">${c.active ? '<span class="pulse"></span>' : '<span class="idle-dot"></span>'}<span>${esc(c.summary || c.id || c.file.split('/').pop())}</span><small>${esc(c.agent)}</small></div>`).join('') || '<div class="empty-sm">No matching sessions.</div>'
-  for (const item of box.querySelectorAll('.deck-session')) {
-    item.onclick = () => selectSession(item.dataset.file, item.dataset.agent, item.dataset.cwd)
-    item.ondblclick = () => { selectSession(item.dataset.file, item.dataset.agent, item.dataset.cwd); setView('radar') }
+  const markup = cards.map(c => `<div class="deck-session" data-file="${esc(c.file)}" data-agent="${esc(c.agent)}" data-cwd="${esc(c.cwd || '')}">${c.active ? '<span class="pulse"></span>' : '<span class="idle-dot"></span>'}<span>${esc(c.summary || c.id || c.file.split('/').pop())}</span><small>${esc(c.agent)}</small></div>`).join('') || '<div class="empty-sm">No matching sessions.</div>'
+  if (writeIfChanged(box, markup)) {
+    for (const item of box.querySelectorAll('.deck-session')) {
+      item.onclick = () => selectSession(item.dataset.file, item.dataset.agent, item.dataset.cwd)
+      item.ondblclick = () => { selectSession(item.dataset.file, item.dataset.agent, item.dataset.cwd); setView('radar') }
+    }
   }
 }
 
@@ -1103,7 +1374,7 @@ function renderSessions() {
         ${c.kind === 'bg' ? '<span class="badge bg">BG</span>' : ''}
         ${c.projectId ? `<span class="badge proj">${esc(c.projectId)}</span>` : ''}
         <span class="sess-cwd">${esc(cwdTail)}</span>
-        <span class="sess-time">${rel(c.mtimeMs)}</span>
+        ${relLabel(c.mtimeMs, { cls: 'sess-time' })}
       </div>
       <div class="sess-sum">${esc(c.summary || '…')}</div>
       ${c.branch ? `<div class="sess-branch">⎇ ${esc(c.branch)}</div>` : ''}
@@ -1167,10 +1438,10 @@ function renderSystem() {
     const total = hist[hist.length - 1].totalMB || 24576
     const x = i => i / (hist.length - 1) * w
     const y = v => h - (v / total) * h
-    area(ctx, hist, x, i => y(hist[i].usedMB), 'rgba(114, 212, 255, 0.32)')
-    area(ctx, hist, x, i => y(hist[i].usedMB + hist[i].compMB), 'rgba(167, 139, 250, 0.20)')
-    line(ctx, hist, x, i => y(total - hist[i].freeMB), 'rgba(251, 113, 133, 0.62)')
-    ctx.fillStyle = '#8e96a8'; ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace'
+    area(ctx, hist, x, i => y(hist[i].usedMB), tokenAlpha('--accent', 0.32))
+    area(ctx, hist, x, i => y(hist[i].usedMB + hist[i].compMB), tokenAlpha('--purple', 0.2))
+    line(ctx, hist, x, i => y(total - hist[i].freeMB), tokenAlpha('--error', 0.62))
+    ctx.fillStyle = token('--muted'); ctx.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace'
     ctx.fillText(gb(total) + ' total · cyan=used violet=+comp red=pressure', 4, 10)
   }
 
@@ -1179,13 +1450,13 @@ function renderSystem() {
   if (hist.length > 1) {
     const max = Math.max(10, ...hist.map(s => s.soRate))
     const bw = w2 / hist.length
-    ctx2.fillStyle = 'rgba(245, 158, 11, 0.55)'
+    ctx2.fillStyle = tokenAlpha('--warn', 0.55)
     hist.forEach((s, i) => {
       if (!s.soRate) return
       const bh = (s.soRate / max) * (h2 - 10)
       ctx2.fillRect(i * bw, h2 - bh, Math.max(1, bw - .5), bh)
     })
-    ctx2.fillStyle = '#8e96a8'; ctx2.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace'
+    ctx2.fillStyle = token('--muted'); ctx2.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace'
     ctx2.fillText(`swapouts/s (peak ${max | 0})`, 4, 9)
   }
 }
@@ -1237,34 +1508,51 @@ function renderServices() {
       ? '<span style="color:var(--green)">available to this local process</span>'
       : '<span style="color:var(--dim)">not in this process environment</span>') +
     row('codex', runtimeState(a.codex) + (a.codex?.configured ? ` · ${esc(a.codex.mode)}` : '')) +
-    (a.codex?.lastRefresh ? row('codex refresh', rel(Date.parse(a.codex.lastRefresh)) + ' ago') : '') +
+    (a.codex?.lastRefresh ? row('codex refresh', relLabel(Date.parse(a.codex.lastRefresh), { suffix: ' ago' })) : '') +
     row('hermes', runtimeState(a.hermes)) +
     row('recovery', !a.claude?.cli ? 'install Claude Code to convene a table' : !a.claude.configured && !a.anthropic?.apiKeyAvailable ? 'sign in to Claude Code or restart Quorum with an API key' : 'local runtime checks only')
 }
 
 function renderProcs() {
   const top = S.processes?.topRss || []
-  $('top-procs').innerHTML = top.map(p =>
+  const markup = top.map(p =>
     `<div class="proc-row">
       ${p.group ? `<span class="grp">${p.group}</span>` : '<span class="grp">·</span>'}
       <span class="proc-name" title="pid ${p.pid}">${esc(p.name)}</span>
       <span class="proc-mem">${gb(p.rssMB)} ${p.cpu > 5 ? '· ' + p.cpu + '%' : ''}</span>
       ${p.group ? `<button class="kill" data-pid="${p.pid}" data-name="${esc(p.name)}" title="SIGTERM">✕</button>` : ''}
     </div>`).join('')
-  for (const b of $('top-procs').querySelectorAll('.kill'))
-    b.onclick = () => {
-      if (confirm(`Stop ${b.dataset.name} (pid ${b.dataset.pid})? Quorum will send SIGTERM to this tracked AI process.`))
-        send({ type: 'proc.kill', pid: +b.dataset.pid })
-    }
+  if (writeIfChanged($('top-procs'), markup)) {
+    for (const b of $('top-procs').querySelectorAll('.kill'))
+      b.onclick = () => {
+        if (confirm(`Stop ${b.dataset.name} (pid ${b.dataset.pid})? Quorum will send SIGTERM to this tracked AI process.`))
+          send({ type: 'proc.kill', pid: +b.dataset.pid })
+      }
+  }
 }
 
 function renderFeed() {
-  $('feed-list').innerHTML = [...S.feed].reverse().slice(0, 60).map(f =>
+  writeIfChanged($('feed-list'), [...S.feed].reverse().slice(0, 60).map(f =>
     `<div class="feed-item feed-${f.kind}"><span class="t">${new Date(f.ts).toLocaleTimeString()}</span><span>${esc(f.text)}</span></div>`
-  ).join('')
+  ).join(''))
 }
 
 /* ── terminals ─────────────────────────────────────────── */
+
+/* xterm.js takes literal colours, not CSS custom properties, so the terminal
+ * used to be the one surface that ignored the theme. It now reads the same
+ * tokens as everything else at the moment a terminal is created. The selection
+ * colour is the accent at 20% — xterm wants an 8-digit hex, so the alpha is
+ * appended rather than mixed. */
+function xtermTheme() {
+  return {
+    background: token('--bg0'),
+    foreground: token('--fg1'),
+    cursor: token('--accent'),
+    selectionBackground: `${token('--accent')}33`,
+  }
+}
+
 function ensureTerm(id, profile) {
   let t = S.terms.get(id)
   if (t) return t
@@ -1275,7 +1563,7 @@ function ensureTerm(id, profile) {
   const term = new Terminal({
     fontSize: 12,
     fontFamily: 'SF Mono, ui-monospace, Menlo, Monaco, Consolas, monospace',
-    theme: { background: '#08090d', foreground: '#d4dae4', cursor: '#72d4ff', selectionBackground: '#72d4ff33' },
+    theme: xtermTheme(),
     scrollback: 4000,
   })
   const fit = new FitAddon.FitAddon()
@@ -1390,7 +1678,6 @@ function renderBoard() {
   const t = S.tasks
   const c = t?.counts || { pending: 0, in_progress: 0, completed: 0 }
   $('board-count').textContent = `${c.in_progress} running · ${c.pending} open · ${c.completed} done`
-  $('tb-tasks').innerHTML = `<span class="tb-item">tasks <b>${c.in_progress}</b>/${c.in_progress + c.pending}</span>`
 
   const groups = { in_progress: [], pending: [], completed: [] }
   for (const task of t?.tasks || []) (groups[task.status] || groups.pending).push(task)
@@ -1530,7 +1817,7 @@ function castFor(sessionId) {
   // can click through to, and a free user tapping Sable would hit a paywall
   // they never asked about.
   const pool = S.cast.filter(c => !c.mascot && !c.locked)
-  if (!pool.length) return { name: '?', role: '', palette: { body: '#556', trim: '#334', glow: '#99a' }, visor: 'dot', crest: 'spark', prop: '' }
+  if (!pool.length) return { name: '?', role: '', palette: { body: token('--muted'), trim: token('--bg2'), glow: token('--fg2') }, visor: 'dot', crest: 'spark', prop: '' }
   let h = 0
   for (let i = 0; i < sessionId.length; i++) h = (h * 31 + sessionId.charCodeAt(i)) >>> 0
   return pool[h % pool.length]
@@ -1917,7 +2204,7 @@ function renderLog() {
       parts.push(`<div class="log-phase">${esc(t.phase)} — ${esc(PHASE_COPY[t.phase] || '')}</div>`)
     }
     const c = S.castById.get(t.speaker)
-    parts.push(`<div class="log-turn ${t.failed ? 'failed' : ''}" style="--c:${c?.palette.body || '#889'}">
+    parts.push(`<div class="log-turn ${t.failed ? 'failed' : ''}" style="--c:${c?.palette.body || 'var(--fg2)'}">
       <div class="log-top">
         <span class="log-name">${esc(t.speakerName)}</span>
         <span class="log-role">${esc(t.speakerRole)}</span>
@@ -1931,8 +2218,26 @@ function renderLog() {
     </div>`)
   }
   if (d && d.endedAt && !d.cancelled && !d.error)
-    parts.push(`<a class="log-export" href="/api/roundtable/${esc(d.id)}.md" download>⤓ export decision record (.md)</a>`)
+    parts.push(`<span class="log-export">
+      <a href="/api/roundtable/${esc(d.id)}.md" download>⤓ .md</a> ·
+      <a href="/api/roundtable/${esc(d.id)}.html" download>polished .html</a> ·
+      <button type="button" id="rt-save-repo" data-id="${esc(d.id)}">save to repo</button> ·
+      <button type="button" id="rt-export-card" data-id="${esc(d.id)}">export card</button>
+    </span>`)
   box.innerHTML = parts.join('')
+  if (d && d.endedAt) {
+    const saveBtn = $('rt-save-repo')
+    if (saveBtn) saveBtn.onclick = async () => {
+      const path = prompt('Target path for ADR (e.g. docs/adr/decision-1.md):', `docs/adr/decision-${d.id.slice(0, 8)}.md`)
+      if (!path) return
+      try {
+        const res = await postJson(`/api/roundtable/save`, { debateId: d.id, targetPath: path })
+        if (res.success) alert('Decision record saved to repo: ' + res.path)
+      } catch (e) { alert('Save failed: ' + e.message) }
+    }
+    const cardBtn = $('rt-export-card')
+    if (cardBtn) cardBtn.onclick = () => exportDebateCard(d)
+  }
   box.scrollTop = box.scrollHeight
 }
 
@@ -1949,7 +2254,7 @@ function renderArchive() {
         <span>${(d.participants || []).length} seats</span>
         <span>$${Number(d.costUsd || 0).toFixed(2)}</span>
         ${d.cancelled ? '<span class="warn">cancelled</span>' : d.error ? '<span class="warn">failed</span>'
-          : `<a class="arc-dl" href="/api/roundtable/${esc(d.id)}.md" download title="export decision record">⤓ .md</a>`}
+          : `<a class="arc-dl" href="/api/roundtable/${esc(d.id)}.md" download title="export decision record">⤓ .md</a> · <a class="arc-dl" href="/api/roundtable/${esc(d.id)}.html" download title="export polished review">.html</a>`}
       </div>
     </div>`).join('')
   for (const el of box.querySelectorAll('.arc'))
@@ -2068,7 +2373,7 @@ function renderMissions() {
   const missionRooms = [...new Set((mission.tasks || []).map(task => task.roomId).filter(Boolean))]
   const missionAgents = [...new Set((mission.tasks || []).map(task => task.agentId || task.packId).filter(Boolean))]
   detail.innerHTML = `<div class="mission-detail-head"><span class="eyebrow">${esc(mission.status)}</span><h2>${esc(mission.title)}</h2><p>${esc(mission.objective)}</p><div class="progress-line"><span style="width:${missionProgress(mission)}%"></span></div><small>${missionProgress(mission)}% complete · updated ${esc(mission.updatedAt)}</small><div class="mission-evidence"><span><b>${mission.tasks?.length || 0}</b> tasks</span><span><b>${missionAgents.length}</b> agents</span><span><b>${mission.artifacts?.length || 0}</b> artifacts</span><span><b>${mission.events?.length || 0}</b> events</span></div><div class="mission-context">${missionRooms.map(id => `<button type="button" data-mission-room="${esc(id)}">${esc((S.projects?.rooms || []).find(room => room.id === id)?.label || id)}</button>`).join('')}</div></div>
-    <div class="mission-tasks"><div class="section-label">TASK GRAPH</div>${(mission.tasks || []).map(task => { const run = managedRuns.find(item => item.missionId === mission.id && item.taskId === task.id && !['completed', 'failed', 'cancelled'].includes(item.status)); const controls = run ? `<span class="task-live">${esc(run.status)} · ${esc(run.phase)}</span><div class="runtime-controls"><button type="button" data-runtime-action="${run.status === 'paused' ? 'resume' : 'pause'}" data-runtime-run="${esc(run.runId)}">${run.status === 'paused' ? 'resume' : 'pause'}</button><button type="button" data-runtime-action="cancel" data-runtime-run="${esc(run.runId)}">cancel</button></div>` : ''; return `<article class="mission-task ${esc(task.status)}"><div><span class="mission-status ${esc(task.status)}"></span><b>${esc(task.title)}</b></div><small>${esc(task.description || 'No task brief')}</small><div class="mission-task-meta">${task.agentId ? esc(task.agentId) : 'unassigned'} · ${task.runtimeId ? esc(task.runtimeId) : 'runtime on dispatch'}${task.dependsOn.length ? ` · waits for ${esc(task.dependsOn.join(', '))}` : ''}</div>${ready.has(task.id) ? `<button type="button" data-task-preview="${esc(task.id)}">preview dispatch</button>` : task.status === 'working' ? (controls || '<span class="task-live">running in a managed session</span>') : ''}</article>` }).join('') || '<div class="empty-sm">No tasks defined.</div>'}</div>
+    <div class="mission-tasks"><div class="section-label">TASK GRAPH</div>${(mission.tasks || []).map(task => { const run = managedRuns.find(item => item.missionId === mission.id && item.taskId === task.id && !['completed', 'failed', 'cancelled'].includes(item.status)); const controls = run ? `<span class="task-live">${esc(run.status)} · ${esc(run.phase)}</span><div class="runtime-controls"><button type="button" data-runtime-action="${run.status === 'paused' ? 'resume' : 'pause'}" data-runtime-run="${esc(run.runId)}">${run.status === 'paused' ? 'resume' : 'pause'}</button><button type="button" data-runtime-action="cancel" data-runtime-run="${esc(run.runId)}">cancel</button></div>` : ''; return `<article class="mission-task ${esc(task.status)}"><div><span class="mission-status ${esc(task.status)}"></span><b>${esc(task.title)}</b></div><small>${esc(task.description || 'No task brief')}</small><div class="mission-task-meta">${task.agentId ? esc(task.agentId) : 'unassigned'} · ${task.runtimeId ? esc(task.runtimeId) : 'runtime on dispatch'}${task.dependsOn.length ? ` · waits for ${esc(task.dependsOn.join(', '))}` : ''}</div>${(task.verification || []).length ? `<div class="mission-task-meta">${esc((task.verification || []).join(' · '))}</div>` : ''}${task.error ? `<div class="mission-task-meta">${esc(task.error)}</div>` : ''}${ready.has(task.id) ? `<button type="button" data-task-preview="${esc(task.id)}">preview dispatch</button>` : task.status === 'working' ? (controls || '<span class="task-live">running in a managed session</span>') : ''}</article>` }).join('') || '<div class="empty-sm">No tasks defined.</div>'}</div>
     <div class="mission-events"><div class="section-label">RECENT EVENTS</div>${(mission.events || []).slice(-8).reverse().map(event => `<div><span>${esc(event.type)}</span><small>${esc(event.detail)} · ${esc(event.at)}</small></div>`).join('') || '<div class="empty-sm">—</div>'}</div>
     ${S.missionPreview?.missionId === mission.id ? `<div class="mission-preview"><div class="section-label">DISPATCH PREVIEW</div><p>${esc(S.missionPreview.preview.summary)}</p><code>${esc(S.missionPreview.preview.launch?.shellCommand || S.missionPreview.preview.command || 'guarded runtime launch')}</code><button type="button" id="mission-confirm-dispatch">confirm dispatch</button><button type="button" id="mission-cancel-dispatch" class="danger">cancel</button></div>` : ''}`
   for (const button of detail.querySelectorAll('[data-task-preview]')) button.onclick = () => previewMissionTask(mission, button.dataset.taskPreview)
@@ -2149,7 +2454,15 @@ function renderMemoryRing() {
   // bounded result list remains below for exhaustive search.
   const entries = artifactList().slice(0, 12)
   const stats = S.artifacts?.stats || { total: entries.length, bySource: {} }
-  $('artifact-count').textContent = `${stats.total || entries.length} indexed · ${stats.truncated ? 'partial' : 'full index'}`
+  // A root Quorum could not read is not an empty root. Saying "full index"
+  // over an unreadable vault is exactly the kind of green this cockpit must
+  // never show.
+  const unreadableRoots = (S.artifacts?.roots || []).filter(root => root.readable === false)
+  const indexScope = unreadableRoots.length
+    ? `${unreadableRoots.length} root${unreadableRoots.length === 1 ? '' : 's'} unreadable`
+    : stats.degraded ? 'partly unreadable' : stats.truncated ? 'partial' : 'full index'
+  $('artifact-count').textContent = `${stats.total || entries.length} indexed · ${indexScope}`
+  $('artifact-count').title = unreadableRoots.length ? unreadableRoots.map(root => `${root.label}: ${root.error || 'unreadable'}`).join('\n') : ''
   const sourceSelect = $('artifact-source')
   if (sourceSelect) {
     const selectedSource = sourceSelect.value
@@ -2158,7 +2471,7 @@ function renderMemoryRing() {
     sourceSelect.value = sources.some(root => root.id === selectedSource) ? selectedSource : ''
   }
   const count = Math.max(1, entries.length)
-  ring.innerHTML = `<div class="ring-center"><span class="eyebrow">LOCAL RECALL</span><strong>${stats.total || 0}</strong><small>${Object.entries(stats.bySource || {}).map(([key, value]) => `${esc(key)} ${value}`).join(' · ')}</small><span data-ring-message>${esc(S.artifactDetail ? `${S.artifactDetail.sourceLabel || S.artifactDetail.source} · ${S.artifactDetail.title}` : 'hover a node to inspect its trail')}</span></div>${entries.map((entry, index) => `<button type="button" class="artifact-node source-${esc(entry.source)} ${S.artifactDetail?.id === entry.id ? 'selected' : ''}" style="--i:${index};--count:${count}" data-artifact-id="${esc(entry.id)}" title="${esc(entry.path)}"><span>${esc(entry.source.slice(0, 3).toUpperCase())}</span><b>${esc(entry.title.slice(0, 30))}</b><small>${rel(entry.mtimeMs)}</small></button>`).join('')}`
+  ring.innerHTML = `<div class="ring-center"><span class="eyebrow">LOCAL RECALL</span><strong>${stats.total || 0}</strong><small>${Object.entries(stats.bySource || {}).map(([key, value]) => `${esc(key)} ${value}`).join(' · ')}</small><span data-ring-message>${esc(S.artifactDetail ? `${S.artifactDetail.sourceLabel || S.artifactDetail.source} · ${S.artifactDetail.title}` : 'hover a node to inspect its trail')}</span></div>${entries.map((entry, index) => `<button type="button" class="artifact-node source-${esc(entry.source)} ${S.artifactDetail?.id === entry.id ? 'selected' : ''}" style="--i:${index};--count:${count}" data-artifact-id="${esc(entry.id)}" title="${esc(entry.path)}"><span>${esc(entry.source.slice(0, 3).toUpperCase())}</span><b>${esc(entry.title.slice(0, 30))}</b>${relLabel(entry.mtimeMs, { tag: 'small' })}</button>`).join('')}`
   const recallOutput = $('memory-recall-output')
   if (recallOutput) {
     recallOutput.classList.toggle('hidden', !S.recallContext)
@@ -2173,7 +2486,7 @@ function renderMemoryRing() {
     node.onclick = () => openArtifact(node.dataset.artifactId)
     node.ondblclick = () => artifactAction(node.dataset.artifactId, 'open')
   }
-  resultsBox.innerHTML = entries.length ? entries.map(entry => `<button type="button" class="artifact-result ${S.artifactDetail?.id === entry.id ? 'selected' : ''}" data-artifact-id="${esc(entry.id)}"><span class="source-mark source-${esc(entry.source)}">${esc(entry.source.slice(0, 3).toUpperCase())}</span><span><b>${esc(entry.title)}</b><small>${esc(entry.relativePath)} · ${esc(entry.summary || 'indexed artifact')}</small></span><time>${rel(entry.mtimeMs)}</time></button>`).join('') : '<div class="empty">No indexed artifacts yet. Reindex after starting Quorum.</div>'
+  resultsBox.innerHTML = entries.length ? entries.map(entry => `<button type="button" class="artifact-result ${S.artifactDetail?.id === entry.id ? 'selected' : ''}" data-artifact-id="${esc(entry.id)}"><span class="source-mark source-${esc(entry.source)}">${esc(entry.source.slice(0, 3).toUpperCase())}</span><span><b>${esc(entry.title)}</b><small>${esc(entry.relativePath)} · ${esc(entry.summary || 'indexed artifact')}</small></span>${relLabel(entry.mtimeMs, { tag: 'time' })}</button>`).join('') : '<div class="empty">No indexed artifacts yet. Reindex after starting Quorum.</div>'
   for (const item of resultsBox.querySelectorAll('[data-artifact-id]')) {
     item.onclick = () => openArtifact(item.dataset.artifactId)
     item.ondblclick = () => artifactAction(item.dataset.artifactId, 'open')
@@ -2228,14 +2541,17 @@ function renderMemoryRing() {
   }
 }
 
+// A fresh snapshot invalidates every surface. Only the visible view is drawn
+// now; the rest are queued and drawn when they are switched to, which is the
+// same pixels for a fraction of the work on a page that opens on one view.
 function renderAll() {
-  renderRuntimes()
+  paint('renderRuntimes')
   setView(S.view)
-  renderTopbar(); renderSessions(); renderSystem(); renderServices(); renderProcs(); renderFeed()
-  renderOffice(); renderRoomDetail(); renderDeck(); renderCommand(); renderAgentControl()
-  renderBoard(); renderComposio(); renderMemory(); renderConnectionMap(); renderAgents(); renderAvatars(); renderMissions(); renderMemoryRing()
-  renderMascot(); renderCrew(); renderCastPicker(); renderRoundtable(); renderArchive()
-  renderEdition()
+  paint('renderTopbar', 'renderSessions', 'renderSystem', 'renderServices', 'renderProcs', 'renderFeed')
+  paint('renderOffice', 'renderRoomDetail', 'renderDeck', 'renderCommand', 'renderAgentControl')
+  paint('renderBoard', 'renderComposio', 'renderMemory', 'renderConnectionMap', 'renderAgents', 'renderAvatars', 'renderMissions', 'renderMemoryRing')
+  paint('renderMascot', 'renderCrew', 'renderCastPicker', 'renderRoundtable', 'renderArchive')
+  paint('renderEdition')
 }
 
 connect()
@@ -2317,6 +2633,86 @@ function tourShow() {
 function tourEnd() {
   tourStep = -1
   $('tour').classList.add('hidden')
+
+async function exportDebateCard(d) {
+  const canvas = document.createElement('canvas')
+  canvas.width = 1200; canvas.height = 1600
+  const ctx = canvas.getContext('2d')
+
+  // Background
+  const grad = ctx.createLinearGradient(0, 0, 1200, 1600)
+  grad.addColorStop(0, token('--bg2')); grad.addColorStop(1, token('--bg0'))
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, 1200, 1600)
+
+  // Branding
+  ctx.fillStyle = token('--accent'); ctx.font = 'bold 32px Inter, sans-serif'
+  ctx.fillText('QUORUM DECISION RECORD', 60, 80)
+  ctx.strokeStyle = token('--stage-edge'); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(60, 100); ctx.lineTo(1140, 100); ctx.stroke()
+
+  // Topic
+  ctx.fillStyle = token('--fg0'); ctx.font = 'bold 64px Inter, sans-serif'
+  const words = d.topic.split(' ')
+  let line = '', y = 200
+  for (const w of words) {
+    if ((line + ' ' + w).length > 30) {
+      ctx.fillText(line, 60, y); y += 80; line = w
+    } else line += (line ? ' ' : '') + w
+  }
+  ctx.fillText(line, 60, y)
+
+  // Verdict
+  const verdict = (d.turns || []).filter(t => t.phase === 'verdict' && !t.failed).pop()
+  if (verdict) {
+    y += 120
+    ctx.fillStyle = token('--accent'); ctx.font = 'bold 32px Inter, sans-serif'
+    ctx.fillText('THE DECISION', 60, y)
+    y += 40
+    ctx.fillStyle = token('--fg0'); ctx.font = '32px Inter, sans-serif'
+    let vLine = '', vY = y
+    const vBody = verdict.body || '_no verdict recorded_'
+    for (const w of vBody.split(' ')) {
+      if ((vLine + ' ' + w).length > 60) {
+        ctx.fillText(vLine, 60, vY); vY += 40; vLine = w
+      } else vLine += (vLine ? ' ' : '') + w
+    }
+    ctx.fillText(vLine, 60, vY)
+    y = vY + 80
+  }
+
+  // Movement Table
+  const openings = (d.turns || []).filter(t => t.phase === 'opening' && !t.failed)
+  const finals = (d.turns || []).filter(t => t.phase === 'converge' && !t.failed)
+  const moved = [...(d.participants || [])].map(id => {
+    const o = openings.find(x => x.speaker === id)
+    const f = finals.find(x => x.speaker === id)
+    return { name: f?.speakerName || o?.speakerName || id, role: f?.speakerRole || o?.speakerRole || 'specialist', opening: o?.position || '—', final: f?.position || '—', shift: (o?.confidence != null && f?.confidence != null) ? `${o.confidence}→${f.confidence}` : '—', conceded: !!f?.conceded }
+  })
+
+  if (moved.length) {
+    y += 40
+    ctx.fillStyle = token('--accent'); ctx.font = 'bold 32px Inter, sans-serif'
+    ctx.fillText('MOVEMENT & DISSENT', 60, y)
+    y += 60
+    ctx.fillStyle = token('--fg2'); ctx.font = 'bold 24px Inter, sans-serif'
+    ctx.fillText('Participant', 60, y); ctx.fillText('Opening', 300, y); ctx.fillText('Final', 600, y); ctx.fillText('Shift', 900, y)
+    y += 40
+    ctx.strokeStyle = token('--stage-edge'); ctx.beginPath(); ctx.moveTo(60, y); ctx.lineTo(1140, y); ctx.stroke()
+    y += 40
+    ctx.fillStyle = token('--fg0'); ctx.font = '24px Inter, sans-serif'
+    for (const m of moved) {
+      ctx.fillText(m.name, 60, y)
+      ctx.fillText(m.opening.slice(0, 20), 300, y)
+      ctx.fillText(m.final.slice(0, 20), 600, y)
+      ctx.fillText(m.shift, 900, y)
+      y += 50
+    }
+  }
+
+  const link = document.createElement('a')
+  link.download = `quorum-decision-${d.id.slice(0, 8)}.png`
+  link.href = canvas.toDataURL('image/png')
+  link.click()
+}
   localStorage.setItem('quorum-tour-done', '1')
 }
 

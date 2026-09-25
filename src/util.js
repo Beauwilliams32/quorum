@@ -54,3 +54,31 @@ export function jsonLines(text) {
   }
   return out
 }
+
+export function stripAnsi(text) {
+  return String(text || '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+}
+
+export function parseReviewerDecision(text) {
+  // A verdict must open a line or a sentence. Provider text reaches this
+  // parser with its whitespace collapsed, so requiring a literal newline made
+  // every structured review read as "no verdict"; a sentence boundary carries
+  // the same meaning without depending on line breaks that no longer survive.
+  //
+  // The LAST such verdict wins. A single regex match is leftmost, which read
+  // "APPROVE is not warranted … REJECT" as an approval — a reviewer that
+  // rejected turned into a green task. Scanning to the end means the reviewer's
+  // closing word is the one that counts, and a reviewer who discusses a verdict
+  // before stating the opposite one is read as having stated the opposite one.
+  const source = stripAnsi(text)
+  let chosen = null
+  for (const match of source.matchAll(/(APPROVE|REJECT)\b/gi)) {
+    const before = source.slice(0, match.index)
+    const opensLine = /(?:^|\n)[ \t]*$/.test(before)
+    const opensSentence = /[.!?]["')\]]?\s+$/.test(before)
+    if (opensLine || opensSentence) chosen = match
+  }
+  if (!chosen) return null
+  const reasoning = source.slice(chosen.index + chosen[0].length).replace(/^[ \t]*:?[ \t]*/, '')
+  return { decision: chosen[1].toUpperCase(), reasoning: reasoning.trim() }
+}

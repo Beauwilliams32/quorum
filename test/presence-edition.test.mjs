@@ -4,18 +4,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import crypto from 'node:crypto'
+import { canonicalPayload } from '../src/licence.js'
+import { scratchDir } from './helpers/scratch.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const run = (home, code) => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', code], {
   cwd: root, env: { ...process.env, HOME: home }, encoding: 'utf8',
 }))
 
-test('paths write to ~/.quorum and read from the legacy home too', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-home-'))
+test('paths write to ~/.quorum and read from the legacy home too', t => {
+  const home = scratchDir(t, 'quorum-home-')
   fs.mkdirSync(path.join(home, '.unified-ai-operator'), { recursive: true })
   fs.writeFileSync(path.join(home, '.unified-ai-operator', 'old.json'), '{}')
   const out = run(home, `
@@ -28,8 +30,8 @@ test('paths write to ~/.quorum and read from the legacy home too', () => {
   assert.equal(out.none, null)
 })
 
-test('stampPresence dedupes by pty, caps the ring and writes to the new home only', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-home-'))
+test('stampPresence dedupes by pty, caps the ring and writes to the new home only', t => {
+  const home = scratchDir(t, 'quorum-home-')
   const out = run(home, `
     import { stampPresence, loadPresence, PRESENCE_FILE } from './src/presence.js'
     const skipped = stampPresence({ agent: 'claude' })
@@ -47,8 +49,8 @@ test('stampPresence dedupes by pty, caps the ring and writes to the new home onl
   assert.equal(fs.existsSync(path.join(home, '.unified-ai-operator')), false)
 })
 
-test('without a licence the edition is free, the Pro cast is advertised as locked and custom cast is not read', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-home-'))
+test('without a licence the edition is free, the Pro cast is advertised as locked and custom cast is not read', t => {
+  const home = scratchDir(t, 'quorum-home-')
   fs.mkdirSync(path.join(home, '.quorum', 'cast'), { recursive: true })
   fs.writeFileSync(path.join(home, '.quorum', 'cast', 'x.json'), JSON.stringify({ id: 'x', prompt: 'p'.repeat(50), palette: { body: '#fff' } }))
   const out = run(home, `
@@ -66,4 +68,38 @@ test('without a licence the edition is free, the Pro cast is advertised as locke
   assert.deepEqual(out.info.locked.map(c => c.id), ['sable', 'muse', 'ledger'])
   assert.equal(out.ids.includes('x'), false)
   assert.equal(out.ids.includes('sable'), false)
+})
+
+// Expiry closes the update window, not the door: a correctly signed Pro licence
+// whose `expires` has passed must still register the Pro cast and say so.
+test('an expired but signed Pro licence still registers the Pro cast and reports updatesExpired', {
+  // The open-core build deliberately omits cast-pro.js. Keep this private
+  // regression in the shared test file, but make its edition-specific path
+  // explicit instead of letting the public artifact fail at runtime.
+  skip: !fs.existsSync(path.join(root, 'src', 'cast-pro.js')),
+}, t => {
+  const home = scratchDir(t, 'quorum-home-')
+  fs.mkdirSync(path.join(home, '.quorum'), { recursive: true })
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519')
+  const licence = { product: 'quorum', tier: 'pro', name: 'Old Buyer', email: 'old@example.com', issued: '2024-01-01', expires: '2025-01-01' }
+  licence.signature = crypto.sign(null, Buffer.from(canonicalPayload(licence), 'utf8'), privateKey).toString('base64')
+  fs.writeFileSync(path.join(home, '.quorum', 'licence.json'), JSON.stringify(licence))
+  const pem = JSON.stringify(publicKey.export({ type: 'spki', format: 'pem' }))
+  const out = run(home, `
+    import { _setPublicKeyForTests } from './src/licence.js'
+    _setPublicKeyForTests(${pem})
+    const { loadEdition, isPro } = await import('./src/edition.js')
+    const { cast } = await import('./src/cast.js')
+    const info = await loadEdition()
+    console.log(JSON.stringify({ info, pro: isPro(), ids: cast().map(c => c.id) }))`)
+  assert.equal(out.info.tier, 'pro')
+  assert.equal(out.pro, true)
+  assert.equal(out.info.updatesExpired, true)
+  assert.equal(out.info.updatesUntil, '2025-01-01')
+  assert.match(out.info.updatesNote, /updates ended 2025-01-01/)
+  assert.equal(out.info.licence.tier, 'pro')
+  assert.equal(out.info.licence.updatesExpired, true)
+  assert.equal(out.info.licence.signature, undefined)
+  assert.deepEqual(out.info.locked, [])
+  assert.equal(out.ids.includes('sable'), true)
 })

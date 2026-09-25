@@ -112,3 +112,85 @@ test('publicLicenceInfo reports the reason when there is no licence', () => {
   assert.equal(info.tier, 'free')
   assert.equal(info.reason, 'no licence found')
 })
+
+// ── Expiry is an update window, not a lockout ──────────────────────────────
+// The canon (docs/trident/business-architecture.md) promises a licence past
+// `expires` degrades to the purchased version's features, never to free. These
+// tests go through verifyLicence with a test keypair by swapping the baked-in
+// public key via the exported hook below — see `_setPublicKeyForTests`.
+import { _setPublicKeyForTests } from '../src/licence.js'
+
+const withTestKey = fn => {
+  const restore = _setPublicKeyForTests(publicKey.export({ type: 'spki', format: 'pem' }))
+  try { return fn() } finally { restore() }
+}
+const { publicKey } = (() => {
+  // Re-derive the public half of the throwaway private key above.
+  return { publicKey: crypto.createPublicKey(privateKey) }
+})()
+
+test('an expired but correctly signed Pro licence keeps tier pro and flags updatesExpired', () => {
+  withTestKey(() => {
+    const expired = { ...base, expires: '2020-01-01' }
+    const r = verifyLicence({ ...expired, signature: sign(expired) }, Date.parse('2026-09-03'))
+    assert.equal(r.valid, true)
+    assert.equal(r.tier, 'pro')
+    assert.equal(r.updatesExpired, true)
+    assert.equal(r.updatesUntil, '2020-01-01')
+    assert.match(r.reason, /updates ended 2020-01-01/)
+    const info = publicLicenceInfo(r)
+    assert.equal(info.tier, 'pro')
+    assert.equal(info.updatesExpired, true)
+    assert.equal(info.updatesUntil, '2020-01-01')
+    assert.equal(info.signature, undefined)
+  })
+})
+
+test('a Pro licence with a future expiry is valid with updatesExpired false', () => {
+  withTestKey(() => {
+    const live = { ...base, expires: '2099-01-01' }
+    const r = verifyLicence({ ...live, signature: sign(live) }, Date.parse('2026-09-03'))
+    assert.equal(r.valid, true)
+    assert.equal(r.tier, 'pro')
+    assert.equal(r.updatesExpired, false)
+    assert.equal(r.updatesUntil, '2099-01-01')
+    assert.equal(r.reason, 'ok')
+  })
+})
+
+test('a tampered expired licence is still rejected — expiry grace never bypasses the signature', () => {
+  withTestKey(() => {
+    const expired = { ...base, expires: '2020-01-01' }
+    const licence = { ...expired, signature: sign(expired) }
+    licence.expires = '2099-01-01'
+    const r = verifyLicence(licence, Date.parse('2026-09-03'))
+    assert.equal(r.valid, false)
+    assert.equal(r.tier, 'free')
+    assert.equal(r.updatesExpired, false)
+    assert.match(r.reason, /does not match/)
+  })
+  // And without the matching public key installed, the same expired licence is
+  // rejected exactly as before — signature first, always.
+  const expired = { ...base, expires: '2020-01-01' }
+  const r = verifyLicence({ ...expired, signature: sign(expired) }, Date.parse('2026-09-03'))
+  assert.equal(r.valid, false)
+  assert.equal(r.tier, 'free')
+})
+
+test('a perpetual (expires: null) Pro licence is unchanged: valid, no update window', () => {
+  withTestKey(() => {
+    const r = verifyLicence({ ...base, signature: sign(base) })
+    assert.equal(r.valid, true)
+    assert.equal(r.tier, 'pro')
+    assert.equal(r.updatesExpired, false)
+    assert.equal(r.updatesUntil, null)
+    assert.equal(r.reason, 'ok')
+    assert.equal(publicLicenceInfo(r).updatesUntil, null)
+  })
+})
+
+test('a failed verification always carries updatesExpired false and no window', () => {
+  const r = verifyLicence(null)
+  assert.equal(r.updatesExpired, false)
+  assert.equal(r.updatesUntil, null)
+})

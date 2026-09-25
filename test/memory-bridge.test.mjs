@@ -4,9 +4,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { MemoryBridge } from '../src/memory-bridge.js'
+import { scratchDir } from './helpers/scratch.mjs'
 
-test('Obsidian bridge writes only inside its Quorum mission folder', () => {
-  const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-vault-'))
+test('Obsidian bridge writes only inside its Quorum mission folder', t => {
+  const vault = scratchDir(t, 'quorum-vault-')
   const bridge = new MemoryBridge({ vault, memUrl: '', now: () => new Date('2026-09-01T12:00:00.000Z') })
   const mission = { id: 'mission-123', title: 'Index the workspace', objective: 'Keep agent recall bounded.' }
   const task = { id: 'scan', title: 'Scan files' }
@@ -17,8 +18,8 @@ test('Obsidian bridge writes only inside its Quorum mission folder', () => {
   assert.equal(path.relative(vault, result.path).startsWith('09_AI_AGENTS/Quorum/Missions/'), true)
 })
 
-test('memory status includes the source-of-truth pointer health', () => {
-  const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-vault-status-'))
+test('memory status includes the source-of-truth pointer health', t => {
+  const vault = scratchDir(t, 'quorum-vault-status-')
   const bridge = new MemoryBridge({ vault, memUrl: '' })
   const status = bridge.status()
   assert.equal(typeof status.sourceOfTruth.ok, 'boolean')
@@ -26,8 +27,8 @@ test('memory status includes the source-of-truth pointer health', () => {
   assert.ok(Array.isArray(status.sourceOfTruth.references))
 })
 
-test('mission notes preserve human text and retain separate task sections', () => {
-  const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-vault-notes-'))
+test('mission notes preserve human text and retain separate task sections', t => {
+  const vault = scratchDir(t, 'quorum-vault-notes-')
   const bridge = new MemoryBridge({ vault, memUrl: '', now: () => new Date('2026-09-01T12:00:00.000Z') })
   const mission = { id: 'mission-456', title: 'Ship safely', objective: 'Preserve every note.' }
   const run = { runId: 'run-456', runtime: 'codex', status: 'closed', disposition: 'completed', worktree: '/tmp/worktree' }
@@ -68,9 +69,9 @@ test('claude-mem probe records a reachable local endpoint without exposing respo
   assert.equal('body' in status.claudeMem, false)
 })
 
-test('bridge sync invokes the fixed review-first exporter with a bounded environment', async () => {
+test('bridge sync invokes the fixed review-first exporter with a bounded environment', async t => {
   let invocation
-  const bridgeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-memory-bridge-'))
+  const bridgeRoot = scratchDir(t, 'quorum-memory-bridge-')
   fs.mkdirSync(path.join(bridgeRoot, 'scripts'), { recursive: true })
   fs.writeFileSync(path.join(bridgeRoot, 'config.json'), '{}')
   fs.writeFileSync(path.join(bridgeRoot, 'scripts', 'sync-and-export.mjs'), '')

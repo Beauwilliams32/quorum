@@ -22,17 +22,6 @@ CLI authentication and environment readiness without displaying or storing
 credentials. Optional runtimes are configured through validated bare commands
 in `~/.quorum/config.json`.
 
-The buildable standalone Command surface is in `standalone-command/`:
-
-```sh
-cd standalone-command
-npm install
-npm run local
-```
-
-It connects to a Quorum instance on loopback and falls back truthfully when
-Quorum is offline.
-
 ## Safety
 
 - The catalog exposes readiness metadata only: no keys, tokens, prompts, or transcripts.
@@ -41,6 +30,20 @@ Quorum is offline.
 - Roundtable turns preserve cost preview, cancellation, and tool/MCP stripping.
 - Configuration writes are limited to project roots, labels, runtimes, model mappings, pet preferences, and display settings.
 - Pet assets remain local under `~/.quorum/pets`; deterministic fallback pets work without an image tool.
+
+## Quorum Pro
+
+The free edition seats the full cockpit and three debaters — Nib, Vex and Bolt.
+Three specialists are advertised in-app but locked: **Sable** (adversary),
+**Muse** (designer) and **Ledger** (operator). Quorum Pro unlocks them and adds
+custom cast authoring, so you can write your own specialists.
+
+Quorum Pro is **$99 one time**, and the first 100 licences are
+**$79**. It is bring-your-own-key: debate turns run on your own
+Claude account, and Quorum resells no model usage. macOS is the supported host
+today; Linux and Windows acceptance is pending.
+
+<https://tridentsocial.net/quorum/#pricing>
 
 ## Public boundary
 

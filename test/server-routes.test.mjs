@@ -6,25 +6,43 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
-import fs from 'node:fs'
-import os from 'node:os'
+import net from 'node:net'
+import { defer, scratchDir, stopChild } from './helpers/scratch.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const PORT = 4700 + Math.floor(Math.random() * 90)
-const base = `http://127.0.0.1:${PORT}`
-const controlStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-route-state-'))
+const controlStateDir = scratchDir(test, 'quorum-route-state-')
 const missionStateFile = path.join(controlStateDir, 'missions.json')
 
+/* The port used to be `4700 + random(90)`, which is a live range on a machine
+ * that runs Quorum: the owner's own instance sits on 4747, so roughly one gate
+ * run in ninety died with "server exited 1" and fifteen red route tests that
+ * had nothing to do with the change under test. A gate that fails at random is
+ * a gate nobody reads. Ask the OS for a free port instead. */
+const freePort = () => new Promise((resolve, reject) => {
+  const probe = net.createServer()
+  probe.once('error', reject)
+  probe.listen(0, '127.0.0.1', () => {
+    const { port } = probe.address()
+    probe.close(() => resolve(port))
+  })
+})
+
+let PORT
+let base
 let child
 test.before(async () => {
-  child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(PORT), AGENT_CONTROL_STATE_DIR: controlStateDir, QUORUM_MISSIONS_PATH: missionStateFile }, stdio: ['ignore', 'pipe', 'pipe'] })
+  PORT = await freePort()
+  base = `http://127.0.0.1:${PORT}`
+  child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(PORT), AGENT_CONTROL_STATE_DIR: controlStateDir, QUORUM_MISSIONS_PATH: missionStateFile, QUORUM_GATEWAY_TOKEN_ENV: 'QUORUM_TEST_GATEWAY_TOKEN', QUORUM_TEST_GATEWAY_TOKEN: 'test-gateway-secret' }, stdio: ['ignore', 'pipe', 'pipe'] })
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('server did not start')), 15000)
     child.stdout.on('data', d => { if (String(d).includes(`:${PORT}`)) { clearTimeout(t); resolve() } })
     child.on('exit', c => reject(new Error('server exited ' + c)))
   })
 })
-test.after(() => { child?.kill('SIGTERM') })
+// Registered after the state directory, so it runs first: the server has
+// exited before its state directory is removed, and cannot write it back.
+defer(test, () => stopChild(child))
 
 test('GET /health returns the readiness document', async () => {
   const r = await fetch(`${base}/health`)
@@ -54,6 +72,84 @@ test('GET /api/state exposes state, feed and roundtable lists but no persona pro
   assert.ok(Array.isArray(s.roundtables.live))
   assert.ok(Array.isArray(s.roundtables.recent))
   assert.equal(JSON.stringify(s).includes('"prompt":'), false)
+})
+
+test('OpenClaw routes preserve auth-required state and guard action previews', async () => {
+  const status = await fetch(`${base}/api/openclaw/status`)
+  assert.equal(status.status, 200)
+  const body = await status.json()
+  // probe() reports 'auth-required' when an OpenClaw gateway answers on :18789 and
+  // 'offline' when nothing is listening — so pinning one value made this test pass on a
+  // dev box with the gateway up and fail on CI, where it is not. The invariant that
+  // actually matters is that an unauthenticated bridge never claims to be connected.
+  assert.notEqual(body.connectionState, 'connected')
+  assert.ok(['auth-required', 'offline'].includes(body.connectionState), `unexpected connectionState: ${body.connectionState}`)
+  assert.equal(JSON.stringify(body).includes('secret'), false)
+
+  const denied = await fetch(`${base}/api/openclaw/actions/preview`, { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, body: JSON.stringify({ method: 'gateway.restart' }) })
+  assert.equal(denied.status, 403)
+  const previewResponse = await fetch(`${base}/api/openclaw/actions/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: 'gateway.restart', reason: 'route test' }) })
+  assert.equal(previewResponse.status, 201)
+  const preview = (await previewResponse.json()).preview
+  assert.equal(preview.requiresConfirmation, true)
+  const cancelled = await fetch(`${base}/api/openclaw/actions/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ previewId: preview.id }) })
+  assert.equal(cancelled.status, 200)
+  assert.equal((await cancelled.json()).action.status, 'cancelled')
+})
+
+function waitForGatewayFrame(ws, predicate) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error('timed out waiting for gateway frame')) }, 5000)
+    const onMessage = raw => {
+      let frame
+      try { frame = JSON.parse(String(raw)) } catch { return }
+      if (!predicate(frame)) return
+      cleanup(); resolve(frame)
+    }
+    const onError = error => { cleanup(); reject(error) }
+    const cleanup = () => { clearTimeout(timer); ws.off('message', onMessage); ws.off('error', onError) }
+    ws.on('message', onMessage); ws.on('error', onError)
+  })
+}
+
+test('Quorum Gateway speaks OpenClaw v4 challenge/connect/hello and bounded RPC frames', async () => {
+  const status = await fetch(`${base}/api/gateway/status`)
+  assert.equal(status.status, 200)
+  const statusBody = await status.json()
+  assert.equal(statusBody.protocol, 4)
+  assert.equal(statusBody.wsPath, '/gateway')
+  assert.equal(JSON.stringify(statusBody).includes('test-gateway-secret'), false)
+
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/gateway`, { origin: base })
+  const challenge = await waitForGatewayFrame(ws, frame => frame.type === 'event' && frame.event === 'connect.challenge')
+  assert.match(challenge.payload.nonce, /^[A-Za-z0-9_-]+$/)
+  assert.equal(typeof challenge.payload.ts, 'number')
+
+  ws.send(JSON.stringify({ type: 'req', id: 'connect-1', method: 'connect', params: { minProtocol: 4, maxProtocol: 4, client: { id: 'route-test', version: '1.0.0', platform: 'test', mode: 'operator' }, role: 'operator', scopes: ['operator.read', 'operator.approvals'], auth: { token: 'test-gateway-secret' } } }))
+  const hello = await waitForGatewayFrame(ws, frame => frame.type === 'res' && frame.id === 'connect-1')
+  assert.equal(hello.ok, true)
+  assert.equal(hello.payload.type, 'hello-ok')
+  assert.equal(hello.payload.protocol, 4)
+  assert.ok(hello.payload.features.methods.includes('sessions.list'))
+  assert.equal(JSON.stringify(hello).includes('test-gateway-secret'), false)
+
+  ws.send(JSON.stringify({ type: 'req', id: 'sessions-1', method: 'sessions.list', params: {} }))
+  const sessions = await waitForGatewayFrame(ws, frame => frame.type === 'res' && frame.id === 'sessions-1')
+  assert.equal(sessions.ok, true)
+  assert.ok(Array.isArray(sessions.payload.sessions))
+
+  ws.send(JSON.stringify({ type: 'req', id: 'write-1', method: 'agent', params: { message: 'must-preview' } }))
+  const denied = await waitForGatewayFrame(ws, frame => frame.type === 'res' && frame.id === 'write-1')
+  assert.equal(denied.ok, false)
+  assert.equal(denied.error.code, 'FORBIDDEN')
+  assert.equal(denied.error.details.code, 'MISSING_PREVIEW')
+
+  ws.send(JSON.stringify({ type: 'req', id: 'preview-1', method: 'quorum.action.preview', params: { method: 'gateway.restart', reason: 'protocol test', params: { token: 'test-gateway-secret' } } }))
+  const preview = await waitForGatewayFrame(ws, frame => frame.type === 'res' && frame.id === 'preview-1')
+  assert.equal(preview.ok, true)
+  assert.equal(preview.payload.status, 'pending-confirmation')
+  assert.equal(JSON.stringify(preview).includes('test-gateway-secret'), false)
+  ws.close()
 })
 
 test('GET /api/operations exposes a bounded operator projection', async () => {

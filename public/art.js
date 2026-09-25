@@ -18,7 +18,35 @@
  */
 'use strict'
 
-const INK = '#12141c'
+import { token } from './theme.js'
+
+/* The ink outline, the concede tick and the room stage all come from
+ * public/tokens.css so the crew recolours with the cockpit instead of carrying
+ * a second palette. They are module-level `let`s refreshed by
+ * refreshArtTheme(), which runs at import and can be re-run if the theme ever
+ * changes at runtime — the template literals below read them at call time.
+ *
+ * The ROOM keys are the --stage-* token names, not painting instructions:
+ * `wall` is the backdrop the whole 200x110 viewBox is flooded with, `mid` the
+ * upper band, `floor` the band below FLOOR_Y. The initial literals are the
+ * tokens' own values, kept in step by test/runtime-theme.test.mjs.
+ *
+ * Persona body/trim/glow colours are NOT in here: those arrive from the
+ * server's cast data and stay hex-validated server-side. Nothing in this file
+ * relaxes that. */
+let INK = '#070a0e'
+let ROOM = { wall: '#070a0e', mid: '#111821', floor: '#1a232e', line: '#24303d' }
+let CONCEDE = '#46d6a0'
+let LIT = { roundtable: '#f2b544', focus: '#3fd0e0', idle: '#24303d' }
+
+/** Re-resolve every themed colour from the CSS tokens. */
+export function refreshArtTheme() {
+  INK = token('--bg0')
+  ROOM = { wall: token('--stage-wall'), mid: token('--stage-mid'), floor: token('--stage-floor'), line: token('--stage-edge') }
+  CONCEDE = token('--ok')
+  LIT = { roundtable: token('--warn'), focus: token('--accent'), idle: token('--stage-edge') }
+}
+refreshArtTheme()
 
 /* Level of detail. A 34px avatar with a held prop reads as mud, so detail is
  * added by size rather than drawn once and scaled down.
@@ -131,8 +159,8 @@ export function drawCharacter(member, opts = {}) {
 /* A conceded participant gets a visible mark — changing your mind is the point
  * of the exercise, so it should be legible on the floor, not buried in text. */
 const concedeMark = () =>
-  `<g transform="translate(74 22)"><circle r="11" fill="#0b0e14" stroke="${INK}" stroke-width="3"/>` +
-  `<path d="M-5 0 L-1 4 L6 -4" fill="none" stroke="#4ade80" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></g>`
+  `<g transform="translate(74 22)"><circle r="11" fill="${ROOM.wall}" stroke="${INK}" stroke-width="3"/>` +
+  `<path d="M-5 0 L-1 4 L6 -4" fill="none" stroke="${CONCEDE}" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></g>`
 
 /**
  * The product mascot lockup — Nib plus the wordmark. Used in the topbar and as
@@ -161,7 +189,7 @@ export function drawMascot(nib, mood = 'idle') {
  * avatar look *inside* something.
  */
 export function drawRoom(mode = 'idle') {
-  const lit = mode === 'roundtable' ? '#f5a524' : mode === 'focus' ? '#22d3ee' : '#2a3348'
+  const lit = LIT[mode] || LIT.idle
   const active = mode !== 'idle'
 
   // FLOOR_Y is shared with the avatar layer, which stands characters' feet on
@@ -173,11 +201,11 @@ export function drawRoom(mode = 'idle') {
   // repeated gradient ids are invalid and resolve unpredictably. Two flat
   // rects with opacity give the same depth with no shared id namespace.
   return `<svg class="room-art" viewBox="0 0 200 110" preserveAspectRatio="none" aria-hidden="true">` +
-    `<rect width="200" height="110" fill="#0d111b"/>` +
-    `<rect width="200" height="${FLOOR_Y}" fill="#161b28"/>` +
+    `<rect width="200" height="110" fill="${ROOM.wall}"/>` +
+    `<rect width="200" height="${FLOOR_Y}" fill="${ROOM.mid}"/>` +
     // The floor the characters stand on.
-    `<rect y="${FLOOR_Y}" width="200" height="${110 - FLOOR_Y}" fill="#10151f"/>` +
-    `<path d="M0 ${FLOOR_Y} H200" stroke="#232c40" stroke-width="2"/>` +
+    `<rect y="${FLOOR_Y}" width="200" height="${110 - FLOOR_Y}" fill="${ROOM.floor}"/>` +
+    `<path d="M0 ${FLOOR_Y} H200" stroke="${ROOM.line}" stroke-width="2"/>` +
     // Light source lives in the top-right corner, clear of the room title. It
     // is a wash rather than a lamp shape: an object drawn up there competes
     // with the label text for the same few pixels and always loses.

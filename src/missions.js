@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { validateVerifyCommand } from './validate.js'
 
 const DEFAULT_PATH = path.join(os.homedir(), '.quorum', 'missions.json')
 const MAX_EVENTS = 200
@@ -34,6 +35,11 @@ function cleanTask(input, index) {
     branch: text(input?.branch, 180) || null,
     dependsOn: Array.isArray(input?.dependsOn || input?.dependencies) ? [...new Set((input.dependsOn || input.dependencies).map(value => text(value, 80)).filter(Boolean))].slice(0, 20) : [],
     status: ['queued', 'ready', 'working', 'blocked', 'failed', 'cancelled', 'completed'].includes(input?.status) ? input.status : 'queued',
+    // The check Quorum runs itself to decide whether this task is done. An
+    // invalid command is dropped rather than silently shell-executed, and a
+    // task without one is verified on the criteria that remain.
+    verifyCommand: validateVerifyCommand(input?.verifyCommand).value,
+    verification: Array.isArray(input?.verification) ? input.verification.map(value => text(value, 300)).filter(Boolean).slice(0, 20) : [],
     ptyId: null,
     error: null,
     startedAt: null,
@@ -147,6 +153,7 @@ export class MissionStore {
     if (patch.worktree !== undefined) task.worktree = text(patch.worktree, 400) || null
     if (patch.branch !== undefined) task.branch = text(patch.branch, 180) || null
     if (patch.error !== undefined) task.error = text(patch.error, 1000) || null
+    if (patch.verification !== undefined) task.verification = (Array.isArray(patch.verification) ? patch.verification : [patch.verification]).map(value => text(value, 300)).filter(Boolean).slice(0, 20)
     if (patch.startedAt !== undefined) task.startedAt = patch.startedAt
     if (patch.completedAt !== undefined) task.completedAt = patch.completedAt
     task.updatedAt = now()

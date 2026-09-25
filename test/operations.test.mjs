@@ -34,3 +34,9 @@ test('buildOperations redacts prompt-bearing local text before it reaches the pr
   assert.match(result.cronJobs[0].subject, /\[redacted\]/)
   assert.match(result.events[0].text, /\[redacted\]/)
 })
+
+test('operations keeps OpenClaw authentication visible in the node projection', () => {
+  const result = buildOperations({ openclaw: { connectionState: 'auth-required', port: 18789, authState: 'required' } })
+  assert.equal(result.nodes.find(node => node.id === 'openclaw').status, 'auth-required')
+  assert.match(result.nodes.find(node => node.id === 'openclaw').detail, /auth required/)
+})

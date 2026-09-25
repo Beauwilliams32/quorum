@@ -33,7 +33,7 @@ export class PtyManager {
 
   // `command` overrides the profile's default CLI. It is built server-side only
   // (never from raw client text) — see buildResumeCommand in server.js.
-  create(profile = 'shell', cwd, cols = 120, rows = 30, command = null, envOverrides = {}) {
+  create(profile = 'shell', cwd, cols = 120, rows = 30, command = null, envOverrides = {}, owner = null) {
     const shell = process.env.SHELL || '/bin/zsh'
     const cli = command || commandFor(profile)
     const args = profile === 'shell' && !command ? ['-l'] : ['-l', '-i', '-c', cli || 'true']
@@ -50,7 +50,7 @@ export class PtyManager {
       cwd: cwd || os.homedir(),
       env,
     })
-    const rec = { id, profile, cwd: cwd || os.homedir(), term, buf: '', subs: new Set(), exited: false }
+    const rec = { id, profile, cwd: cwd || os.homedir(), term, buf: '', subs: new Set(), exited: false, owner }
     this.map.set(id, rec)
 
     term.onData(data => {
@@ -74,25 +74,34 @@ export class PtyManager {
   attach(id, ws) {
     const rec = this.map.get(id)
     if (!rec) return
+    if (rec.owner && rec.owner !== ws) return
+    if (!rec.owner) rec.owner = ws
     rec.subs.add(ws)
     if (ws.readyState === 1)
       ws.send(JSON.stringify({ type: 'pty.attach', id, profile: rec.profile, data: rec.buf, exited: rec.exited }))
   }
 
   detachAll(ws) {
-    for (const rec of this.map.values()) rec.subs.delete(ws)
+    for (const rec of this.map.values()) {
+      rec.subs.delete(ws)
+      if (rec.owner === ws) rec.owner = null
+    }
   }
 
-  input(id, data) { this.map.get(id)?.term.write(data) }
-
-  resize(id, cols, rows) {
+  input(id, data, owner = null) {
     const rec = this.map.get(id)
-    if (rec && !rec.exited && cols > 0 && rows > 0) rec.term.resize(cols, rows)
+    if (rec && (!owner || rec.owner === owner)) rec.term.write(data)
   }
 
-  kill(id) {
+  resize(id, cols, rows, owner = null) {
+    const rec = this.map.get(id)
+    if (rec && (!owner || rec.owner === owner) && !rec.exited && cols > 0 && rows > 0) rec.term.resize(cols, rows)
+  }
+
+  kill(id, owner = null) {
     const rec = this.map.get(id)
     if (!rec) return
+    if (owner && rec.owner !== owner) return
     if (!rec.exited) rec.term.kill()
     this.map.delete(id)
     this.broadcastList()

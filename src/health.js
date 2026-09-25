@@ -9,7 +9,9 @@ export function buildHealth(stateData = {}, { now = Date.now(), startedAt = now 
   const projects = stateData.projects?.rooms || []
   const hermes = services.hermes?.up === true
   const comfy = services.comfy?.up === true
-  const openclaw = services.openclaw?.up === true
+  const openclawBridge = stateData.openclaw || {}
+  const openclawState = openclawBridge.connectionState || (services.openclaw?.up === true ? 'reachable' : 'offline')
+  const openclaw = ['reachable', 'connecting', 'connected', 'degraded', 'auth-required'].includes(openclawState)
 
   return {
     status: hermes ? 'ok' : 'degraded',
@@ -26,7 +28,7 @@ export function buildHealth(stateData = {}, { now = Date.now(), startedAt = now 
             : auth.anthropic?.apiKeyAvailable ? 'ready-api-key'
               : 'needs-claude-login-or-api-key',
       hermes: hermes ? 'ready' : 'optional-offline',
-      openclaw: openclaw ? 'ready' : 'optional-offline',
+      openclaw: openclawState === 'connected' ? 'connected' : openclawState === 'auth-required' ? 'auth-required' : openclaw ? openclawState : 'optional-offline',
     },
     sessions: {
       total: sessions.length,

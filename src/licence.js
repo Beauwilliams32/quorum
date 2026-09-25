@@ -17,14 +17,35 @@
 // A licence being invalid is never a crash. It degrades to the free edition
 // with a stated reason, because the worst outcome here is a paying customer
 // locked out of a tool that runs on their own machine.
+//
+// `expires` bounds the UPDATE window, not the software. A correctly signed
+// licence whose `expires` has passed still unlocks the tier it was bought for;
+// the result just carries `updatesExpired: true` and `updatesUntil` so the
+// cockpit can say "updates ended <date>" instead of silently dropping to free.
+// Only a missing, tampered or foreign licence degrades to free. Fulfilment is
+// the Pro archive + install.sh + licence.json (docs/trident/gumroad-listings-*).
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import { dataDir, findFile } from './paths.js'
 
-const PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+const SELLER_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA1jbYSh0RuATlBGVo4bpPsK9ua/afFBvoW5vsO+UjDy0=
 -----END PUBLIC KEY-----`
+
+let PUBLIC_KEY = SELLER_PUBLIC_KEY
+
+/**
+ * Test-only: swap the verifying key so the expiry branch of verifyLicence can
+ * be exercised without shipping the seller's private key to CI. Returns a
+ * restore function. Production code never calls this; the baked-in key is the
+ * only one that verifies a sold licence.
+ */
+export function _setPublicKeyForTests(pem) {
+  const prev = PUBLIC_KEY
+  PUBLIC_KEY = pem
+  return () => { PUBLIC_KEY = prev }
+}
 
 export const LICENCE_FILE = dataDir('licence.json')
 
@@ -46,7 +67,8 @@ export function canonicalPayload(licence) {
 }
 
 /**
- * @returns {{valid: boolean, tier: string, reason: string, licence: object|null}}
+ * @returns {{valid: boolean, tier: string, reason: string, licence: object|null,
+ *            updatesUntil: string|null, updatesExpired: boolean}}
  */
 export function verifyLicence(licence, now = Date.now()) {
   if (!licence || typeof licence !== 'object')
@@ -69,24 +91,29 @@ export function verifyLicence(licence, now = Date.now()) {
   }
   if (!ok) return fail('licence signature does not match')
 
-  if (isExpired(licence, now))
-    return { valid: false, tier: 'free', reason: `licence expired ${licence.expires}`, licence }
-
   const tier = licence.tier === 'pro' ? 'pro' : 'free'
   if (tier !== 'pro') return fail('licence is not a Pro licence')
 
-  return { valid: true, tier: 'pro', reason: 'ok', licence }
+  // Past `expires` the licence is still valid for the purchased features — only
+  // the update window has closed. Never a lockout.
+  const updatesUntil = licence.expires == null ? null : String(licence.expires)
+  if (isExpired(licence, now))
+    return {
+      valid: true, tier: 'pro', licence, updatesUntil, updatesExpired: true,
+      reason: `ok — updates ended ${licence.expires}; this licence keeps the version it was bought for`,
+    }
+
+  return { valid: true, tier: 'pro', reason: 'ok', licence, updatesUntil, updatesExpired: false }
 }
 
-const fail = reason => ({ valid: false, tier: 'free', reason, licence: null })
+const fail = reason => ({ valid: false, tier: 'free', reason, licence: null, updatesUntil: null, updatesExpired: false })
 
 /**
  * Expiry covers updates, not the software itself: a perpetual licence has a
  * null expiry, and an expired one still runs the version it was bought for.
  *
- * Separated from verifyLicence so it can be tested without the seller's private
- * key — inside verifyLicence the signature check fires first (correctly), which
- * would make every expiry test unreachable without shipping the key to CI.
+ * Separated from verifyLicence so it can be tested on its own; the expiry
+ * branch inside verifyLicence is covered via `_setPublicKeyForTests`.
  * An unparseable date is treated as no expiry rather than as expired: locking a
  * paying customer out over a typo is the worse failure.
  */
@@ -117,5 +144,7 @@ export function publicLicenceInfo(result) {
     tier: 'pro',
     registeredTo: result.licence.name || null,
     expires: result.licence.expires || null,
+    updatesUntil: result.updatesUntil ?? (result.licence.expires || null),
+    updatesExpired: !!result.updatesExpired,
   }
 }

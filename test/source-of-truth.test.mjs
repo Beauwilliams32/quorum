@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { sourceOfTruthPaths, sourceOfTruthStatus } from '../src/source-of-truth.js'
+import { scratchDir } from './helpers/scratch.mjs'
 
-function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-source-truth-'))
+function fixture(t) {
+  const root = scratchDir(t, 'quorum-source-truth-')
   const vault = path.join(root, 'vault')
   const repo = path.join(root, 'repo')
   const home = path.join(root, 'home')
@@ -25,8 +25,8 @@ function fixture() {
   return { root, vault, repo, home, skill: path.join(home, 'skills') }
 }
 
-test('source-of-truth status exposes a secret-free pointer graph', () => {
-  const f = fixture()
+test('source-of-truth status exposes a secret-free pointer graph', t => {
+  const f = fixture(t)
   const memory = path.join(f.home, '.quorum-operator-memory.md')
   const status = sourceOfTruthStatus({ home: f.home, vaultPath: f.vault, repoRoot: f.repo, operatorMemoryPath: memory, skillRoots: [f.skill], workspaceRoot: f.root })
   assert.equal(status.ok, true)
@@ -35,8 +35,8 @@ test('source-of-truth status exposes a secret-free pointer graph', () => {
   assert.equal(status.references.some(item => JSON.stringify(item).includes('api_key')), false)
 })
 
-test('missing canonical pointers degrade status without throwing', () => {
-  const f = fixture()
+test('missing canonical pointers degrade status without throwing', t => {
+  const f = fixture(t)
   const status = sourceOfTruthStatus({ home: f.home, vaultPath: f.vault, repoRoot: f.repo, operatorMemoryPath: path.join(f.home, 'missing.md'), skillRoots: [], workspaceRoot: f.root })
   assert.equal(status.ok, false)
   assert.equal(status.state, 'degraded')
@@ -44,8 +44,8 @@ test('missing canonical pointers degrade status without throwing', () => {
   assert.ok(status.health.includes('missing-skill-roots'))
 })
 
-test('path resolution honors explicit roots without reading file contents', () => {
-  const f = fixture()
+test('path resolution honors explicit roots without reading file contents', t => {
+  const f = fixture(t)
   const paths = sourceOfTruthPaths({ home: f.home, vaultPath: f.vault, repoRoot: f.repo, operatorMemoryPath: path.join(f.home, 'missing.md'), skillRoots: [f.skill], workspaceRoot: f.root })
   assert.equal(paths.vault, path.resolve(f.vault))
   assert.equal(paths.repo, path.resolve(f.repo))

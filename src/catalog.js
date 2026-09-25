@@ -1,11 +1,26 @@
 import fs from 'node:fs'
 import os from 'node:os'
-import { execFileSync } from 'node:child_process'
 import { CONFIG_PATH, loadConfig, loadModels, loadRuntimes } from './config.js'
+import { hasCommand, invalidateCommandCache } from './command-lookup.js'
 
-const hasCommand = command => {
-  if (!command) return false
-  try { execFileSync('zsh', ['-lc', `command -v -- ${JSON.stringify(command)}`], { stdio: 'ignore', timeout: 800 }); return true } catch { return false }
+// buildCatalog() is called from about ten places — the WebSocket handshake,
+// every roundtable start, every command preview, /api/catalog, /api/tools,
+// /api/operations — and each call walked every runtime, probed the filesystem
+// for pet art and re-read config.json several times. The work is the same for
+// all of them within a tick, so it is cached for a short TTL and invalidated
+// by config.json's mtime, which is the only input that changes without a
+// restart.
+const CATALOG_TTL_MS = 30_000
+let cached = null
+
+function configStamp() {
+  try { const stat = fs.statSync(CONFIG_PATH); return `${stat.mtimeMs}:${stat.size}` } catch { return 'absent' }
+}
+
+/** Drop the cached catalog. Exposed so a config write can take effect at once. */
+export function invalidateCatalog({ commands = false } = {}) {
+  cached = null
+  if (commands) invalidateCommandCache()
 }
 const envReady = names => names.some(name => Boolean(process.env[name]))
 const pet = (subjectId, source = 'fallback') => {
@@ -29,7 +44,30 @@ function runtimeFor(id, runtimes) {
   return runtimes.find(runtime => runtime.id === id) || null
 }
 
-export function buildCatalog({ config = loadConfig(), runtimes = loadRuntimes(), models = loadModels() } = {}) {
+export function buildCatalog(options = {}) {
+  // An explicit config/runtimes/models argument is a caller asking about a
+  // hypothetical machine (tests, previews) — never serve those from, or into,
+  // the shared cache.
+  if (options.config || options.runtimes || options.models) return composeCatalog(options)
+  const stamp = configStamp()
+  const now = Date.now()
+  if (cached && cached.stamp === stamp && now - cached.at < CATALOG_TTL_MS) return cached.value
+  const value = deepFreeze(composeCatalog({}))
+  cached = { value, stamp, at: now }
+  return value
+}
+
+// The cached catalog is handed to every caller by reference, so it is frozen:
+// a caller that mutates a shared catalog would corrupt every later handshake,
+// and this turns that into a loud failure instead of a slow one.
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  Object.freeze(value)
+  for (const item of Object.values(value)) deepFreeze(item)
+  return value
+}
+
+function composeCatalog({ config = loadConfig(), runtimes = loadRuntimes(), models = loadModels() } = {}) {
   const runtimeEntries = BUILTIN.map(item => {
     const runtime = runtimeFor(item.id, runtimes)
     const available = item.id === 'openai-api' ? envReady(item.auth) : item.id === 'comfyui-wan'

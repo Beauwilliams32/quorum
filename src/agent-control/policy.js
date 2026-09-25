@@ -28,6 +28,7 @@ export function actionAllowed(policy, role, action, { target, verified = false }
   if (rule.approval === 'target-record' && (!target || typeof target !== 'object' || !target.account || !target.project)) return { ok: false, reason: 'external action needs an explicit account and project target' }
   if (rule.approval === 'target-record' && target.rollback !== true) return { ok: false, reason: 'external action needs a rollback or abort path' }
   if (rule.approval === 'target-record' && target.audit !== true) return { ok: false, reason: 'external action needs an audit record' }
+  if (rule.approval === 'target-record' && rule.requiresIdempotencyKey === true && !String(target.idempotencyKey || '').trim()) return { ok: false, reason: 'external action needs a provider idempotency key' }
   return { ok: true, rule, role: r }
 }
 
@@ -57,6 +58,8 @@ export function classifyAction(argv = []) {
   }
   if (command === 'npm' && (args[1] === 'test' || args[1] === 'run' && /test|check|lint|qa/.test(args[2] || ''))) return 'test'
   if (command === 'npx' && /playwright|wrangler/.test(joined) && /test|check|qa/.test(joined)) return 'test'
+  if (/\b(secret|credential|api[-_ ]?key|token)\b/.test(joined) && /\b(put|set|update|change|rotate|create|delete|revoke)\b/.test(joined)) return 'secret.change'
+  if (/\b(charge|refund|transfer|payout|withdraw|purchase|buy|sell|trade)\b/.test(joined)) return 'financial.execute'
   if (/(^|\s)(wrangler|vercel|netlify)\s+(deploy|promote|rollback)/.test(joined)) return 'deploy'
   if (/\b(publish|send|message|email|post|tweet)\b/.test(joined)) return 'external.send'
   if (/\b(migrate|migration)\b/.test(joined) && /remote|prod|production/.test(joined)) return 'migration.remote'

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { buildCatalog, roundtableModelOptions } from '../src/catalog.js'
-import { previewAction } from '../src/command.js'
+import { executeAction, previewAction } from '../src/command.js'
 import { validateConfig } from '../src/validate.js'
 
 const catalog = buildCatalog({
@@ -78,4 +78,24 @@ test('configuration validation keeps command settings allowlisted', () => {
   const routed = validateConfig({ modelMappings: { ollama: 'deepseek-r1:8b' } })
   assert.equal(routed.ok, true)
   assert.equal(routed.value.modelMappings.ollama, 'deepseek-r1:8b')
+})
+
+test('route and chain present themselves as records, because that is all they do', () => {
+  const events = []
+  const recordingState = { data: state.data, events, event: entry => events.push(entry) }
+  const route = previewAction({ action: 'route', roomId: 'room', modelId: catalog.models[0].id }, catalog, recordingState, ptys)
+  assert.equal(route.executes, false)
+  assert.match(route.summary, /Record a note/)
+  assert.match(route.summary, /starts nothing/)
+  const routed = executeAction(route, { confirm: true }, { state: recordingState, ptys, startPty: () => { throw new Error('route must not launch anything') } })
+  assert.equal(routed.executed, false)
+  assert.equal(routed.recorded, true)
+  assert.match(events.at(-1).text, /route recorded \(no execution\)/)
+
+  const chain = previewAction({ action: 'chain', chainId: 'question-roundtable-task', steps: ['question', 'roundtable'] }, catalog, recordingState, ptys)
+  assert.equal(chain.executes, false)
+  assert.match(chain.summary, /runs no step/)
+  const chained = executeAction(chain, { confirm: true }, { state: recordingState, ptys, startPty: () => { throw new Error('chain must not launch anything') } })
+  assert.equal(chained.executed, false)
+  assert.match(events.at(-1).text, /chain recorded \(no execution\)/)
 })

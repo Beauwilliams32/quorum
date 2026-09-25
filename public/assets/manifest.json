@@ -6,34 +6,47 @@
     "containsText": false,
     "containsLogos": false,
     "fallback": "procedural-three-js-or-css",
-    "maxDisplayBytes": 8388608
+    "maxDisplayBytes": 8388608,
+    "encoding": "webp q90; the PNG masters are archived under archive/assets-png/"
   },
   "assets": [
     {
       "id": "city-backdrop",
-      "path": "/assets/quorum-astral-city-backdrop.png",
+      "path": "/assets/quorum-astral-city-backdrop.webp",
       "kind": "atmosphere",
-      "dimensions": [1672, 941],
+      "dimensions": [
+        1672,
+        941
+      ],
       "usage": "darkened full-bleed Agent City backdrop",
-      "fallback": "radial-gradient city stage"
+      "fallback": "radial-gradient city stage",
+      "bytes": 262334
     },
     {
       "id": "agent-role-atlas",
-      "path": "/assets/quorum-agent-role-atlas.png",
+      "path": "/assets/quorum-agent-role-atlas.webp",
       "kind": "role-token-atlas",
-      "dimensions": [1536, 1024],
+      "dimensions": [
+        1536,
+        1024
+      ],
       "dimensionsNote": "8 role vignettes in a 4x2 atlas",
       "usage": "optional roster and inspector art",
-      "fallback": "code-native role initials and SVG avatars"
+      "fallback": "code-native role initials and SVG avatars",
+      "bytes": 515122
     },
     {
       "id": "district-landmark-atlas",
-      "path": "/assets/quorum-district-landmark-atlas.png",
+      "path": "/assets/quorum-district-landmark-atlas.webp",
       "kind": "district-landmark-atlas",
-      "dimensions": [1536, 1024],
+      "dimensions": [
+        1536,
+        1024
+      ],
       "dimensionsNote": "6 district vignettes in a 3x2 atlas",
       "usage": "optional district/empty-state art",
-      "fallback": "procedural Three.js building silhouettes"
+      "fallback": "procedural Three.js building silhouettes",
+      "bytes": 361402
     },
     {
       "id": "state-effects",

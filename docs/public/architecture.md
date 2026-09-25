@@ -18,3 +18,10 @@ missions folder.
 
 macOS is the currently accepted native host. Linux and Windows adapters are
 present for continued test work but remain native-host acceptance pending.
+
+HQ is an orchestration layer on the same core. The company holds the org chart,
+goals, tickets, budgets and heartbeats. The room holds channels, DMs and
+threads. A ticket becomes a mission and one managed, structured run, so the
+evidence gate and the independent reviewer decide whether it is done. Messages
+are signed per author and every mutation lands in a hash-chained log. See
+[hq.md](hq.md).

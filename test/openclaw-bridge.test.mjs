@@ -36,6 +36,7 @@ test('mutating gateway actions require one expiring confirmation', async () => {
   const preview = bridge.previewAction({ method: 'gateway.restart', reason: 'operator QA' })
   assert.equal(preview.requiresConfirmation, true)
   assert.equal(preview.risk, 'high')
+  assert.equal(preview.rollback, 'operator-defined rollback required')
   const result = await bridge.confirmAction(preview.id)
   assert.equal(result.status, 'executed')
   assert.equal(result.result.token, '[redacted-secret]')
@@ -44,6 +45,10 @@ test('mutating gateway actions require one expiring confirmation', async () => {
   const expired = bridge.previewAction({ method: 'chat.send' })
   now = expired.expiresAt + 1
   await assert.rejects(() => bridge.confirmAction(expired.id), /expired/)
+
+  const cancelled = bridge.previewAction({ method: 'chat.send' })
+  assert.equal(bridge.cancelAction(cancelled.id).status, 'cancelled')
+  await assert.rejects(() => bridge.confirmAction(cancelled.id), /unknown or consumed/)
 })
 
 test('authenticated bridge uses one server-side socket and redacts its public projection', async () => {
@@ -58,9 +63,13 @@ test('authenticated bridge uses one server-side socket and redacts its public pr
   const socket = bridge.socket
   assert.ok(socket)
   socket.emit('open')
+  assert.equal(sent.some(frame => frame.id === 'quorum-connect'), false)
+  socket.emit('message', JSON.stringify({ type: 'event', event: 'connect.challenge', payload: { nonce: 'challenge', ts: 1 } }))
   const connect = sent.find(frame => frame.id === 'quorum-connect')
   assert.equal(connect.type, 'req')
   assert.equal(connect.method, 'connect')
+  assert.equal(connect.params.client.id, 'gateway-client')
+  assert.equal(connect.params.client.mode, 'backend')
   assert.equal(connect.params.auth.token, 'gateway-secret')
 
   socket.emit('message', JSON.stringify({ type: 'res', id: 'quorum-connect', ok: true, payload: { protocol: 4 } }))

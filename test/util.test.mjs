@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import path from 'node:path'
 import { WebSocketServer, WebSocket } from 'ws'
-import { withinDir, isAllowedOrigin } from '../src/util.js'
+import { withinDir, isAllowedOrigin, stripAnsi, parseReviewerDecision } from '../src/util.js'
 
 test('withinDir accepts the directory itself and its children', () => {
   const pub = path.join('/srv', 'app', 'public')
@@ -43,6 +43,43 @@ test('isAllowedOrigin rejects foreign pages, wrong ports and opaque origins', ()
   // Sandboxed iframes and file:// pages send Origin: null — any site can arrange that.
   assert.equal(isAllowedOrigin('null', 4747), false)
   assert.equal(isAllowedOrigin('file://', 4747), false)
+})
+
+test('reviewer verdict parsing handles terminal ANSI and requires a final verdict line', () => {
+  assert.equal(stripAnsi('\u001b[32mAPPROVE\u001b[0m'), 'APPROVE')
+  assert.deepEqual(parseReviewerDecision('\u001b[32mAPPROVE:\u001b[0m focused tests passed'), {
+    decision: 'APPROVE',
+    reasoning: 'focused tests passed',
+  })
+  assert.deepEqual(parseReviewerDecision('notes first\nREJECT unsafe lifecycle\nneeds a regression test'), {
+    decision: 'REJECT',
+    reasoning: 'unsafe lifecycle\nneeds a regression test',
+  })
+  assert.equal(parseReviewerDecision('The word APPROVE appeared in analysis, but there is no verdict line.'), null)
+  // Structured provider output arrives with its whitespace collapsed, so a
+  // verdict that closes a sentence has to be read as a verdict.
+  assert.deepEqual(parseReviewerDecision('The diff is focused and tested. APPROVE: tests cover the change'), {
+    decision: 'APPROVE',
+    reasoning: 'tests cover the change',
+  })
+})
+
+test('the last verdict wins, so a reviewer that rejects is never read as approving', () => {
+  // The reviewer's own probe string. A leftmost match read this as APPROVE and
+  // marked the mission task completed; the reviewer had rejected it.
+  assert.deepEqual(parseReviewerDecision('I reviewed the change. APPROVE is not warranted because the migration drops rows. REJECT'), {
+    decision: 'REJECT',
+    reasoning: '',
+  })
+  // The mirror image: a reviewer who talks about rejecting and then approves.
+  assert.equal(parseReviewerDecision('REJECT would be harsh. The tests cover it. APPROVE').decision, 'APPROVE')
+  // Multiple verdict lines: the closing one is the verdict.
+  assert.deepEqual(parseReviewerDecision('APPROVE: looked fine at first\nREJECT: the migration drops rows'), {
+    decision: 'REJECT',
+    reasoning: 'the migration drops rows',
+  })
+  // A verdict word buried mid-sentence is still not a verdict.
+  assert.equal(parseReviewerDecision('I would not APPROVE this, nor would I REJECT it outright'), null)
 })
 
 // End-to-end: the same handshake gate server.js installs must refuse a

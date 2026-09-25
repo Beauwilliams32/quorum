@@ -2,12 +2,14 @@ const MAX_TEXT = 900
 const PRIVATE_KEY = /-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\n]*PRIVATE KEY-----/gi
 const SECRET_ASSIGNMENT = /((?:["']?(?:api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|password|authorization|cookie|token|secret|private[-_ ]?key)["']?\s*[:=]\s*))(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi
 
-const normalize = value => String(value || '').replace(/\s+/g, ' ').trim().slice(0, MAX_TEXT)
-export const redactRuntimeText = value => normalize(value)
+export const redactRuntimeText = value => String(value || '')
   .replace(PRIVATE_KEY, '[redacted-private-key]')
   .replace(/bearer\s+[a-z0-9._~+/=-]+/gi, 'bearer [redacted]')
   .replace(/\b(?:sk|gh[pousr]|github_pat|xox[baprs]|AIza|AKIA|ASIA)[a-z0-9_:-]{8,}\b/gi, '[redacted-secret]')
   .replace(SECRET_ASSIGNMENT, '$1[redacted-secret]')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, MAX_TEXT)
 
 const clean = redactRuntimeText
 const redact = redactRuntimeText
@@ -30,7 +32,10 @@ export function parseRuntimeLine(runtime, line) {
     if (item.type === 'system') return { type: 'started', sessionId, phase: clean(item.subtype || 'started'), text: redact(item.message) }
     if (item.type === 'assistant') return { type: 'assistant', sessionId, text: redact(textFromContent(item.message?.content || item.content)) }
     if (item.type === 'tool_use' || item.type === 'tool_result') return { type: 'tool', sessionId, phase: clean(item.type), text: redact(textFromContent(item.content || item.message?.content)) }
-    if (item.type === 'result') return { type: item.is_error ? 'failed' : 'completed', sessionId, phase: clean(item.subtype || 'result'), text: redact(item.result || item.message) }
+    // The CLI's own `total_cost_usd` is the only real price signal a managed
+    // run produces. Carrying it on the event is what lets the daily cloud
+    // budget be enforced against recorded spend rather than a guess.
+    if (item.type === 'result') return { type: item.is_error ? 'failed' : 'completed', sessionId, phase: clean(item.subtype || 'result'), text: redact(item.result || item.message), costUsd: Number.isFinite(Number(item.total_cost_usd)) ? Number(item.total_cost_usd) : null }
     return { type: 'event', sessionId, phase: clean(item.subtype || item.type), text: redact(textFromContent(item.message || item.content || item.result)) }
   }
 

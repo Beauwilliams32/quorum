@@ -242,3 +242,52 @@ export function validatePersona(raw) {
     },
   }
 }
+
+// A command whose whole job is to run whatever string it is handed. Quorum
+// never interposes a shell, but `{command: '/bin/sh', args: ['-c', '…']}` is a
+// shell the operator interposed themselves, and the argument rules below do
+// nothing about it. These are refused by name so the guarantee and the code
+// say the same thing.
+const SHELL_PROGRAMS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'fish', 'ash', 'busybox', 'env', 'xargs', 'nohup', 'timeout'])
+// Interpreters that are legitimate check runners (`node --test`, `python -m
+// pytest`) but also take inline source. The program is allowed; the
+// evaluate-this-string flag is not.
+const INLINE_CODE_PROGRAMS = new Set(['node', 'deno', 'bun', 'python', 'python2', 'python3', 'perl', 'ruby', 'php', 'osascript'])
+const INLINE_CODE_FLAGS = new Set(['-c', '-e', '-E', '--eval', '--eval-file', '--command'])
+
+/**
+ * A mission task's own verification command — the thing Quorum runs itself to
+ * decide whether the task is actually done, rather than believing an agent's
+ * exit code.
+ *
+ * It is executed with `execFile`, so Quorum never interposes a shell: the
+ * program and its arguments go to the OS as an argv vector and nothing
+ * expands, globs or splits them. That is the whole of the containment claim,
+ * and it is worth stating plainly what it is *not* — it is not a sandbox. A
+ * verifyCommand is a real command the operator chose, set through the same
+ * loopback, Origin-gated mission API as the launch path, and it runs with the
+ * cockpit's own privileges. The rules here keep it an argv vector: a bare
+ * program name or a path, no shell metacharacters or whitespace in the program,
+ * plain-value arguments, and a refusal for programs whose only purpose is to
+ * interpret a string as a script.
+ */
+export function validateVerifyCommand(raw) {
+  const errors = []
+  if (raw === undefined || raw === null || raw === '') return { ok: true, value: null, errors }
+  const input = typeof raw === 'string' ? { command: raw } : raw
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, value: null, errors: ['verifyCommand must be a string or an object'] }
+  const command = str(input.command, 200)
+  if (!command) errors.push('verifyCommand needs a command')
+  else if (/[\s;&|<>$`\\'"(){}\[\]*?~#\n]/.test(command)) errors.push('verifyCommand must be a bare program name or absolute path — no arguments or shell characters')
+  const rawArgs = Array.isArray(input.args) ? input.args : []
+  if (rawArgs.length > 20) errors.push('verifyCommand accepts at most 20 arguments')
+  const args = rawArgs.slice(0, 20).map(value => str(value, 200))
+  if (args.some(value => value === null)) errors.push('verifyCommand arguments must be strings')
+  else if (args.some(value => /[;&|<>$`\\\n]/.test(value))) errors.push('verifyCommand arguments must not contain shell metacharacters')
+  const program = String(command || '').split('/').pop().toLowerCase()
+  if (SHELL_PROGRAMS.has(program)) errors.push(`verifyCommand must be the check itself, not a shell that runs one — ${program} interprets its argument as a script`)
+  else if (INLINE_CODE_PROGRAMS.has(program) && args.some(value => INLINE_CODE_FLAGS.has(String(value)))) errors.push(`verifyCommand must not hand ${program} inline source to evaluate — point it at a script or a test runner instead`)
+  const timeoutMs = Math.max(1_000, Math.min(Number(input.timeoutMs) || 600_000, 1_800_000))
+  if (errors.length) return { ok: false, value: null, errors }
+  return { ok: true, errors, value: { command, args, timeoutMs } }
+}

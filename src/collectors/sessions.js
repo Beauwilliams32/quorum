@@ -14,25 +14,94 @@ const ACTIVE_MS = 90 * 1000       // transcript written in last 90s → "live"
 // file -> { mtimeMs, size, card } so unchanged transcripts aren't re-read every tick
 const cache = new Map()
 
-export function startSessions(state) {
+// Every tick used to statSync every .jsonl under ~/.claude/projects and
+// ~/.codex/sessions — 12,000 files on the benchmark corpus, 47ms of syscalls
+// every 3 seconds, to learn that almost all of them are months old and
+// outside the 48h window this collector even looks at.
+//
+// A cheap tick now stats only the files that were inside that window last
+// time (the only ones that can produce or change a card) plus any directory
+// whose own mtime moved, which is what creating a file does. Appending to a
+// file does not move its directory's mtime, so a session dormant for more
+// than 48h and then resumed would be invisible to cheap ticks alone — hence
+// a full sweep every FULL_SWEEP_TICKS, which bounds that at 15 seconds.
+export const FULL_SWEEP_TICKS = 5
+const dirCursor = new Map()    // directory -> mtimeMs at its last full read
+const freshByDir = new Map()   // directory -> Set of files inside the 48h window
+let tickCount = 0
+
+export function startSessions(state, { intervalMs = 3_000 } = {}) {
   const tick = () => {
     try {
-      const cards = [...scanClaude(), ...scanCodex()]
+      const full = tickCount % FULL_SWEEP_TICKS === 0
+      tickCount += 1
+      const seen = full ? new Set() : null
+      const cards = [...scanClaude(full, seen), ...scanCodex(full, seen)]
       cards.sort((a, b) => b.mtimeMs - a.mtimeMs)
       const now = Date.now()
       for (const c of cards) c.active = now - c.mtimeMs < ACTIVE_MS
+      if (full) evictUnseen(seen)
       state.update('sessions', { cards: cards.slice(0, 40) })
     } catch { /* collector must never die */ }
   }
   tick()
-  setInterval(tick, 3000)
+  return setInterval(tick, intervalMs)
+}
+
+/**
+ * Drop cached transcripts whose files no longer exist. Without this the cache
+ * grew for the life of the process — a rotated or deleted session stayed
+ * resident forever.
+ */
+function evictUnseen(seen) {
+  for (const file of cache.keys()) if (!seen.has(file)) cache.delete(file)
+  for (const [dir, files] of freshByDir) {
+    for (const file of files) if (!seen.has(file)) files.delete(file)
+    if (!files.size) freshByDir.delete(dir)
+  }
+}
+
+/**
+ * List the .jsonl files in `dir` worth stating this tick. On a full sweep, or
+ * when the directory itself changed, that is all of them; otherwise it is
+ * only the ones that were inside the freshness window last time.
+ */
+function candidates(dir, full, seen) {
+  let dirMtime = null
+  try { dirMtime = fs.statSync(dir).mtimeMs } catch { return [] }
+  const changed = dirCursor.get(dir) !== dirMtime
+  if (!full && !changed) return [...(freshByDir.get(dir) || [])]
+  let names = []
+  try { names = fs.readdirSync(dir) } catch { return [] }
+  dirCursor.set(dir, dirMtime)
+  const files = names.filter(name => name.endsWith('.jsonl')).map(name => path.join(dir, name))
+  if (seen) for (const file of files) seen.add(file)
+  return files
+}
+
+function noteFreshness(dir, file, fresh) {
+  if (fresh) {
+    let files = freshByDir.get(dir)
+    if (!files) { files = new Set(); freshByDir.set(dir, files) }
+    files.add(file)
+    return
+  }
+  const files = freshByDir.get(dir)
+  if (!files) return
+  files.delete(file)
+  if (!files.size) freshByDir.delete(dir)
+}
+
+function forget(dir, file) {
+  cache.delete(file)
+  noteFreshness(dir, file, false)
 }
 
 function jobIds() {
   try { return fs.readdirSync(CLAUDE_JOBS) } catch { return [] }
 }
 
-function scanClaude() {
+function scanClaude(full = true, seen = null) {
   const cards = []
   const jobs = jobIds()
   let dirs = []
@@ -40,14 +109,13 @@ function scanClaude() {
   const now = Date.now()
   for (const dir of dirs) {
     const dpath = path.join(CLAUDE_PROJECTS, dir)
-    let files = []
-    try { files = fs.readdirSync(dpath) } catch { continue }
-    for (const f of files) {
-      if (!f.endsWith('.jsonl')) continue
-      const file = path.join(dpath, f)
+    for (const file of candidates(dpath, full, seen)) {
+      const f = path.basename(file)
       let st
-      try { st = fs.statSync(file) } catch { continue }
-      if (now - st.mtimeMs > FRESH_MS) continue
+      try { st = fs.statSync(file) } catch { forget(dpath, file); continue }
+      const fresh = now - st.mtimeMs <= FRESH_MS
+      noteFreshness(dpath, file, fresh)
+      if (!fresh) { cache.delete(file); continue }
 
       const hit = cache.get(file)
       if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
@@ -104,7 +172,7 @@ function toolHint(input) {
   return s.includes('/') && !s.includes(' ') ? s.split('/').pop() : s.slice(0, 60)
 }
 
-function scanCodex() {
+function scanCodex(full = true, seen = null) {
   const cards = []
   const now = Date.now()
   // sessions/YYYY/MM/DD/rollout-*.jsonl — walk newest few day-dirs only
@@ -117,14 +185,13 @@ function scanCodex() {
   } catch { return cards }
 
   for (const day of days.slice(0, 6)) {
-    let files = []
-    try { files = fs.readdirSync(day) } catch { continue }
-    for (const f of files) {
-      if (!f.endsWith('.jsonl')) continue
-      const file = path.join(day, f)
+    for (const file of candidates(day, full, seen)) {
+      const f = path.basename(file)
       let st
-      try { st = fs.statSync(file) } catch { continue }
-      if (now - st.mtimeMs > FRESH_MS) continue
+      try { st = fs.statSync(file) } catch { forget(day, file); continue }
+      const fresh = now - st.mtimeMs <= FRESH_MS
+      noteFreshness(day, file, fresh)
+      if (!fresh) { cache.delete(file); continue }
 
       const hit = cache.get(file)
       if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
@@ -284,4 +351,12 @@ function codexEvents(lines) {
     }
   }
   return out
+}
+
+/** Test seam: forget every cached transcript, cursor and freshness marker. */
+export function resetSessionCachesForTests() {
+  cache.clear()
+  dirCursor.clear()
+  freshByDir.clear()
+  tickCount = 0
 }
