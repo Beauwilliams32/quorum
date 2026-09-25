@@ -1,12 +1,13 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="mission-control">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Quorum</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 120'><path d='M36 54 C30 68 23 84 23 93 Q23 102 33 102 L67 102 Q77 102 77 93 C77 84 70 68 64 54 Z' fill='%23f5a524' stroke='%2312141c' stroke-width='4'/><rect x='27' y='17' width='46' height='40' rx='13' fill='%23f5a524' stroke='%2312141c' stroke-width='4'/><circle cx='42' cy='37' r='5' fill='%2312141c'/><circle cx='58' cy='37' r='5' fill='%2312141c'/><path d='M50 2 L58 18 L50 15 L42 18 Z' fill='%23ffd48a' stroke='%2312141c' stroke-width='3'/></svg>">
+<title>Quorum — Decision OS</title>
+<meta name="description" content="Quorum: A local-first AI cockpit for autonomous agent orchestration, adversarial debate, and durable decision records.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 120'><path d='M36 54 C30 68 23 84 23 93 Q23 102 33 102 L67 102 Q77 102 77 93 C77 84 70 68 64 54 Z' fill='%233fd0e0' stroke='%230b0f14' stroke-width='4'/><rect x='27' y='17' width='46' height='40' rx='13' fill='%233fd0e0' stroke='%230b0f14' stroke-width='4'/><circle cx='42' cy='37' r='5' fill='%230b0f14'/><circle cx='58' cy='37' r='5' fill='%230b0f14'/><path d='M50 2 L58 18 L50 15 L42 18 Z' fill='%23f2b544' stroke='%230b0f14' stroke-width='3'/></svg>">
 <link rel="stylesheet" href="/vendor/xterm.css">
-<link rel="stylesheet" href="/design-system.css">
+<link rel="stylesheet" href="/tokens.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -15,6 +16,7 @@
   <span id="topbar-scanline" class="hud-scanline" aria-hidden="true"></span>
   <span class="brand"><span id="mascot-slot"></span><span class="brand-word">QUORUM</span><span id="edition-badge" class="edition free">FREE</span></span>
   <nav id="view-toggle" aria-label="View">
+    <button type="button" data-view="hq">HQ</button>
     <button type="button" data-view="office" class="on">Studio</button>
     <button type="button" data-view="command">Command</button>
     <button type="button" data-view="table">Roundtable</button>
@@ -24,6 +26,7 @@
     <button type="button" data-view="memory">Memory</button>
     <button type="button" data-view="radar">Radar</button>
   </nav>
+  <button type="button" id="tb-hq" class="tb-hq hidden" title="Quorum HQ — your agent company"></button>
   <span id="tb-tasks"></span>
   <span id="tb-agents"></span>
   <span class="spacer"></span>
@@ -48,6 +51,41 @@
     </div>
   </div>
 </div>
+
+<!-- ── HQ ─────────────────────────────────────────────────────────────── -->
+<!-- The company (org chart, goals, tickets, budgets) and the room (channels,
+     threads, @mentions). Regions below are filled by public/hq.js; the two
+     composers are static so a state update never eats what you are typing. -->
+<main id="view-hq" class="view hidden">
+  <aside id="hq-sidebar" class="hq-sidebar" aria-label="Company, channels and team"></aside>
+  <section id="hq-main" class="hq-main" aria-label="Channel">
+    <div id="hq-onboarding" class="hq-onboarding hidden"></div>
+    <header id="hq-channel-head" class="hq-channel-head"></header>
+    <div id="hq-pulse" class="hq-pulse" aria-label="Company pulse"></div>
+    <div id="hq-flash" class="hq-flash" role="status" aria-live="polite"></div>
+    <div id="hq-messages" class="hq-messages" aria-live="polite"></div>
+    <div id="hq-typing" class="hq-typing" aria-live="polite"></div>
+    <form id="hq-composer" class="hq-composer" autocomplete="off">
+      <div id="hq-suggest" class="hq-suggest hidden" role="listbox" aria-label="Suggestions"></div>
+      <label class="sr-only" for="hq-input">Message</label>
+      <textarea id="hq-input" rows="1" placeholder="Message #general — @mention an agent to hand them work, / for commands"></textarea>
+      <button type="submit" id="hq-send" class="hq-btn primary">Send</button>
+    </form>
+  </section>
+  <aside id="hq-panel" class="hq-panel" aria-label="Company detail">
+    <form id="hq-search" class="hq-search" role="search" autocomplete="off">
+      <label class="sr-only" for="hq-search-input">Search messages and tickets</label>
+      <input id="hq-search-input" type="search" maxlength="300" placeholder="Search everything — in:#general from:@codey">
+    </form>
+    <nav id="hq-tabs" class="hq-tabs" role="tablist" aria-label="HQ panels"></nav>
+    <div id="hq-panel-body" class="hq-panel-body"></div>
+    <form id="hq-thread-composer" class="hq-thread-composer hidden" autocomplete="off">
+      <label class="sr-only" for="hq-thread-input">Reply in thread</label>
+      <textarea id="hq-thread-input" rows="2" placeholder="Reply in thread — @mention the assignee to wake them"></textarea>
+      <button type="submit" class="hq-btn primary">Reply</button>
+    </form>
+  </aside>
+</main>
 
 <!-- ── STUDIO ─────────────────────────────────────────────────────────── -->
 <main id="view-office" class="view">
@@ -103,7 +141,7 @@
 <!-- ── COMMAND CENTER ──────────────────────────────────────────────── -->
 <main id="view-command" class="view hidden">
   <section class="command-main">
-    <div class="col-head">TRIDENT COMMAND · UNIFIED OPERATOR</div>
+    <div class="col-head">TRIDENT COMMAND · QUORUM OPERATOR</div>
     <div class="command-hero">
       <div><span class="eyebrow">LOCAL OPERATING SYSTEM</span><h1>Control the work. Keep the evidence.</h1><p>Route bounded tasks into real runtimes, watch their leases, and keep the memory that makes the next run faster.</p></div>
       <div id="command-connection" class="command-connection">catalog loading…</div>
@@ -144,13 +182,18 @@
     <div class="card"><div class="card-head">DECISION FLOW</div><div class="command-flow">Question <b>→</b> Roundtable <b>→</b> Approval <b>→</b> Task <b>→</b> Harness</div><button id="command-roundtable" type="button">open roundtable handoff</button></div>
     <div class="card"><div class="card-head">SAFETY BOUNDARY</div><div class="kv"><div>storage <b>local only</b></div><div>auth <b>existing CLI / env</b></div><div>secrets <b>never displayed</b></div><div>pet assets <b>~/.quorum/pets</b></div></div></div>
     <div class="card"><div class="card-head">AGENT CONTROL <span>LEASED</span></div><div id="agent-control-card" class="agent-control-card"><div class="empty-sm">control plane warming up…</div></div></div>
+    <div class="card" data-claude-artifacts>
+      <div class="card-head">SHIPPED ARTIFACTS <span class="claude-artifacts-count">—</span></div>
+      <div class="claude-artifacts-list empty-sm">reading catalog…</div>
+      <p class="hint claude-artifacts-foot">Published Claude artifacts, read from the workspace catalog through the local artifact index.</p>
+    </div>
   </aside>
 </main>
 
 <!-- ── MISSIONS ─────────────────────────────────────────────────────── -->
 <main id="view-missions" class="view hidden">
   <section id="missions-main">
-    <div class="col-head">MISSION CONTROL <span id="mission-count"></span></div>
+    <div class="col-head">QUORUM MISSIONS <span id="mission-count"></span></div>
     <div class="mission-intro"><span class="eyebrow">DURABLE WORK</span><h1>Turn intent into accountable runs.</h1><p>Each mission keeps its objective, task dependencies, agent assignment, artifacts, and operational history in Quorum’s local core.</p></div>
     <form id="mission-form" class="mission-form" autocomplete="off">
       <fieldset class="mission-template" aria-label="Mission shape">
@@ -330,6 +373,10 @@
   </section>
   <section id="board-side">
     <div class="card">
+      <div class="card-head">ADR INDEX</div>
+      <div id="adr-list" class="empty-sm">scanning for decisions…</div>
+    </div>
+    <div class="card">
       <div class="card-head">COMPOSIO <span id="composio-summary"></span></div>
       <div id="composio-card" class="kv"></div>
     </div>
@@ -340,6 +387,11 @@
     <div class="card">
       <div class="card-head">LIVE AGENTS</div>
       <div id="agents-card"></div>
+    </div>
+    <div class="card" data-claude-artifacts>
+      <div class="card-head">SHIPPED ARTIFACTS <span class="claude-artifacts-count">—</span></div>
+      <div class="claude-artifacts-list empty-sm">reading catalog…</div>
+      <p class="hint claude-artifacts-foot">Published Claude artifacts, read from the workspace catalog through the local artifact index.</p>
     </div>
   </section>
 </main>
@@ -389,5 +441,60 @@
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script type="module" src="/app.js"></script>
+<script type="module">
+// Shipped Claude artifacts — read-only catalog card (Board + Command).
+// The catalog is a workspace file (docs/artifacts/claude-artifacts.json) that the
+// artifact index already scans, so this needs no new server route: locate the
+// manifest through /api/artifacts/search, read it through /api/artifacts/:id,
+// and render the entries. Nothing here can mutate the cockpit or the catalog.
+(() => {
+  const MANIFEST = 'docs/artifacts/claude-artifacts.json'
+  const boxes = [...document.querySelectorAll('[data-claude-artifacts]')]
+  if (!boxes.length) return
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+  const day = value => { const t = Date.parse(value || ''); return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : '' }
+  async function locate() {
+    const response = await fetch(`/api/artifacts/search?q=${encodeURIComponent('claude-artifacts.json')}&limit=10`)
+    const data = await response.json()
+    // Match on the absolute path: relativePath is relative to whichever index
+    // root found the file, so it is only the bare filename under a custom root.
+    return (data.results || []).find(entry => String(entry.path || '').endsWith('/' + MANIFEST) || String(entry.path || '').endsWith('/claude-artifacts.json')) || null
+  }
+  async function load() {
+    const entry = await locate()
+    if (!entry) return { missing: true }
+    const response = await fetch(`/api/artifacts/${encodeURIComponent(entry.id)}`)
+    const item = await response.json()
+    if (!response.ok) throw new Error(item.error || 'catalog unavailable')
+    return { entry, catalog: JSON.parse(item.content || '{}') }
+  }
+  function paint(state) {
+    for (const box of boxes) {
+      const list = box.querySelector('.claude-artifacts-list')
+      const count = box.querySelector('.claude-artifacts-count')
+      const foot = box.querySelector('.claude-artifacts-foot')
+      if (!list) continue
+      if (state.error) { count.textContent = '—'; list.className = 'claude-artifacts-list empty-sm'; list.textContent = state.error; continue }
+      if (state.missing) { count.textContent = '0'; list.className = 'claude-artifacts-list empty-sm'; list.textContent = 'catalog not indexed yet — open Memory and reindex, or add docs/artifacts/claude-artifacts.json to the workspace'; continue }
+      const entries = Array.isArray(state.catalog.artifacts) ? state.catalog.artifacts : []
+      const ready = entries.filter(item => item.status === 'ship-ready').length
+      count.textContent = `${ready}/${entries.length} ready`
+      list.className = 'claude-artifacts-list'
+      list.innerHTML = entries.map(item => `<a class="agent-row" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer" title="${esc(item.purpose || '')}"><span>${esc(item.favicon || '▪')}</span><span class="agent-name">${esc(item.title)}</span><span class="proj">${esc(item.kind || '')}</span><span class="agent-status">${esc(item.status || '')}</span></a>`).join('') || '<div class="empty-sm">catalog is empty</div>'
+      if (foot) foot.textContent = `${entries.length} published · catalog verified ${day(state.catalog.verifiedAt) || 'never'} · ${esc(state.entry.relativePath || MANIFEST)}`
+    }
+  }
+  async function refresh() {
+    try { paint(await load()) } catch (error) { paint({ error: String(error.message || error) }) }
+  }
+  refresh()
+  setInterval(refresh, 60_000)
+})()
+</script>
+  <footer class="cockpit-footer">
+    <span class="footer-brand">QUORUM Decision OS</span>
+    <span class="footer-version">v0.4.0-stable</span>
+    <span class="footer-status">system nominal</span>
+  </footer>
 </body>
 </html>

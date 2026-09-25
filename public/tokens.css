@@ -1,0 +1,206 @@
+/* Quorum design tokens — the ONE palette.
+ *
+ * Before this file there were three stacked `:root` blocks (design-system.css,
+ * style.css head, and an "ASTRAL GUILD THEME" block near the end of style.css
+ * that silently overrode both). Changing a colour meant guessing which layer
+ * won. Every colour, radius, duration and font the cockpit uses is now declared
+ * exactly once, here, and nothing else in `public/` may declare a `--token: `
+ * on `:root` — test/style.test.mjs fails the build if it does.
+ *
+ * THEME: "mission control" — a dark, calm operations room. Near-black panels,
+ * a cyan accent that means LIVE, amber that means NEEDS ATTENTION, monospace
+ * telemetry, dense and fast to scan. Colour is a signal, never decoration.
+ *
+ * Anchors picked by the owner; everything else is derived from them:
+ *   --bg      #0b0f14   the room
+ *   --accent  #3fd0e0   live / selected / cyan
+ *   --warn    #f2b544   needs attention / amber
+ *
+ * CONTRAST: every body-text and status-label token clears WCAG AA (4.5:1)
+ * against both --bg and --bg1. test/style.test.mjs computes the ratios from
+ * this file rather than trusting the comment.
+ *
+ * A SECOND THEME LATER: the token block is attached to `:root` and to
+ * `:root[data-theme="mission-control"]`. A future palette is a sibling
+ * `:root[data-theme="<name>"]` block that redeclares the same names — no
+ * component CSS changes. There is no user-facing theme switcher today, and the
+ * UI does not pretend there is one.
+ *
+ * THE 3D CITY AND THE SVG CHARACTERS READ THESE TOKENS TOO, at runtime, via
+ * public/theme.js (getComputedStyle on :root, with the literal fallbacks in
+ * that file for the case where the stylesheet has not applied yet). Keep the
+ * fallbacks in theme.js in step with the values here — test/style.test.mjs
+ * asserts they match.
+ */
+
+:root,
+:root[data-theme="mission-control"] {
+  color-scheme: dark;
+
+  /* ── canvas: the room, darkest at the walls ─────────────────────── */
+  --bg: #0b0f14;
+  --bg0: #070a0e;
+  --bg1: #111821;
+  --bg2: #1a232e;
+  --stage-wall: var(--bg0);
+  --stage-mid: var(--bg1);
+  --stage-floor: var(--bg2);
+  --stage-edge: #24303d;
+  --ink: var(--bg0);
+
+  /* ── surfaces: translucent panels over the canvas ───────────────── */
+  --surface: rgba(146, 178, 204, 0.055);
+  --surface-strong: rgba(146, 178, 204, 0.1);
+  --surface-quiet: rgba(146, 178, 204, 0.03);
+  --surface-card: var(--surface);
+  --surface-raised: var(--surface-strong);
+  --surface-active: rgba(63, 208, 224, 0.14);
+  --panel: rgba(17, 24, 33, 0.82);
+  --panel-deep: rgba(7, 10, 14, 0.86);
+
+  /* ── lines ──────────────────────────────────────────────────────── */
+  --line: rgba(146, 178, 204, 0.16);
+  --line-soft: rgba(146, 178, 204, 0.09);
+  --border-subtle: var(--line-soft);
+  --border-strong: var(--line);
+  --border-active: rgba(63, 208, 224, 0.62);
+
+  /* ── text: AA against --bg and --bg1 ────────────────────────────── */
+  --fg0: #e8f0f6;   /* 16.7:1 — headings */
+  --fg1: #cbd8e3;   /* 13.2:1 — body */
+  --fg2: #93a6b6;   /*  7.7:1 — meta */
+  --muted: #7e909f; /*  5.8:1 — labels */
+  --ghost: #768996; /*  5.3:1 — faintest text we allow */
+  --faint: var(--muted);
+  --dim: var(--fg2);
+  --fg: var(--fg0);
+  --text: var(--fg1);
+  --text-strong: var(--fg0);
+  --text-body: var(--fg1);
+  --text-meta: var(--fg2);
+  --text-faint: var(--muted);
+  /* --c is the per-element character tint; elements override it inline. */
+  --c: var(--fg1);
+
+  /* ── status: the only colours that carry meaning ────────────────── */
+  --accent: #3fd0e0;        /* live, selected, in-flight */
+  --accent-strong: #7ee6f2;
+  --accent-soft: rgba(63, 208, 224, 0.16);
+  --cyan: var(--accent);
+  --live: var(--accent);
+  --warn: #f2b544;          /* needs attention */
+  --warn-soft: rgba(242, 181, 68, 0.14);
+  --yellow: var(--warn);
+  --orange: #f2b544;
+  --ok: #46d6a0;
+  --green: var(--ok);
+  --error: #ff7a85;
+  --red: var(--error);
+  --info: #8fb4ff;
+  --purple: #b39dff;
+  --state-command: var(--accent);
+  --state-ok: var(--ok);
+  --state-warn: var(--warn);
+  --state-danger: var(--error);
+  --state-roundtable: var(--warn);
+  --state-memory: var(--purple);
+  --state-local: var(--ok);
+  --pink: #ee9ed4;
+
+  /* ── runtime identity: one hue per engine, chips derive from it ─── */
+  --runtime-claude: var(--purple);
+  --runtime-codex: var(--ok);
+  --runtime-hermes: var(--warn);
+  --runtime-openclaw: var(--pink);
+  --runtime-gemini: var(--info);
+  --runtime-comfy: var(--error);
+  --char-glow: rgba(63, 208, 224, 0.55);
+
+  /* ── tints and edges derived from the status hues ───────────────────
+     Every translucent wash in the cockpit is mixed from the token above it,
+     so changing --accent recolours the fills, the borders and the glows
+     together instead of leaving 203 hand-written rgba() values behind. */
+  --wash-accent: color-mix(in srgb, var(--accent) 6%, transparent);
+  --tint-accent: color-mix(in srgb, var(--accent) 12%, transparent);
+  --tint-accent-strong: color-mix(in srgb, var(--accent) 22%, transparent);
+  --tint-ok: color-mix(in srgb, var(--ok) 11%, transparent);
+  --tint-warn: color-mix(in srgb, var(--warn) 12%, transparent);
+  --tint-error: color-mix(in srgb, var(--error) 11%, transparent);
+  --tint-purple: color-mix(in srgb, var(--purple) 12%, transparent);
+  --tint-neutral: var(--surface);
+  /* Mask stops. A mask reads only the alpha channel, so these are opacity
+     ends, not palette entries — but they still belong here rather than as a
+     bare `black` in a declaration value, which is a colour literal the guard
+     in test/helpers/stylesheet.mjs now catches. */
+  --mask-opaque: #000;
+  --edge-accent: color-mix(in srgb, var(--accent) 46%, transparent);
+  --edge-accent-soft: color-mix(in srgb, var(--accent) 26%, transparent);
+  --edge-ok: color-mix(in srgb, var(--ok) 42%, transparent);
+  --edge-warn: color-mix(in srgb, var(--warn) 46%, transparent);
+  --edge-error: color-mix(in srgb, var(--error) 46%, transparent);
+  --edge-purple: color-mix(in srgb, var(--purple) 36%, transparent);
+  --glow-accent: color-mix(in srgb, var(--accent) 16%, transparent);
+  --glow-ok: color-mix(in srgb, var(--ok) 14%, transparent);
+  --glow-warn: color-mix(in srgb, var(--warn) 14%, transparent);
+
+  /* ── scrims and shadows: the room is dark, so depth is black ────── */
+  --scrim: rgba(0, 0, 0, 0.45);
+  --scrim-strong: rgba(0, 0, 0, 0.62);
+  /* Dims the decorative city backdrop far enough that live state stays the
+     brightest thing on the deck. */
+  --scrim-backdrop: rgba(7, 10, 14, 0.93);
+  --shadow-node: 0 12px 30px rgba(0, 0, 0, 0.42);
+  --shadow-pop: 0 18px 46px rgba(0, 0, 0, 0.5);
+
+  /* ── typography: native-first so the cockpit works offline ──────── */
+  --font-ui: "SF Pro Text", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Monaco, Consolas, monospace;
+  --sans: var(--font-ui);
+  --mono: var(--font-mono);
+  --text-display: 30px;
+  --text-title: 20px;
+  --text-body-size: 13px;
+  --text-meta-size: 10px;
+  --leading-body: 1.5;
+  --leading-tight: 1.15;
+  /* Telemetry reads as telemetry: wide-tracked uppercase mono. */
+  --track-label: .14em;
+  --track-brand: .26em;
+
+  /* ── geometry: dense, squared-off, operations-room ──────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --pad-card: var(--space-4);
+  --pad-col-head: var(--space-2) var(--space-3);
+  --radius-control: 4px;
+  --radius-card: 5px;
+  --radius-panel: 7px;
+  --radius-pill: 999px;
+  --topbar-h: 40px;
+  --drawer-h: 260px;
+  --rail-narrow: 260px;
+  --rail-wide: 330px;
+  --ring-size: 1px;
+  --focus-ring: 2px solid var(--accent);
+  --shadow-card-inner: inset 0 1px 0 rgba(146, 178, 204, 0.045);
+  --shadow-panel: 0 10px 28px rgba(0, 0, 0, 0.42);
+
+  /* ── motion: deliberately quiet ─────────────────────────────────── */
+  --duration-fast: 120ms;
+  --duration-base: 170ms;
+  --ease-standard: cubic-bezier(.2, .8, .2, 1);
+
+  /* ── defaults for per-element custom properties ─────────────────── */
+  --i: 0;
+  --count: 1;
+  --radius: 150px;
+  --source-color: var(--accent);
+  --x: 0px;
+  --y: 0px;
+  --z: 0px;
+}

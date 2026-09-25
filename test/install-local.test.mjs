@@ -1,24 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { scratchDir } from './helpers/scratch.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const script = join(root, 'scripts', 'install-local.mjs');
 
-function fixture() {
-  const source = mkdtempSync(join(tmpdir(), 'quorum-installer-source-'));
+function fixture(t) {
+  const source = scratchDir(t, 'quorum-installer-source-');
   mkdirSync(join(source, 'node_modules', 'node-pty'), { recursive: true });
   writeFileSync(join(source, 'package.json'), JSON.stringify({ name: 'quorum' }));
   writeFileSync(join(source, 'server.js'), '');
   return source;
 }
 
-test('installer dry-run is portable and writes nothing', () => {
-  const source = fixture();
-  const home = mkdtempSync(join(tmpdir(), 'quorum-installer-home-'));
+test('installer dry-run is portable and writes nothing', t => {
+  const source = fixture(t);
+  const home = scratchDir(t, 'quorum-installer-home-');
   const output = execFileSync(process.execPath, [script, '--source', source, '--home', home, '--port', '4877'], { encoding: 'utf8' });
   const start = output.indexOf('{');
   const end = output.indexOf('\nNo files were written');
@@ -29,9 +29,9 @@ test('installer dry-run is portable and writes nothing', () => {
   assert.match(output, /No files were written/);
 });
 
-test('installer writes a client-specific LaunchAgent without loading it', () => {
-  const source = fixture();
-  const home = mkdtempSync(join(tmpdir(), 'quorum-installer-home-'));
+test('installer writes a client-specific LaunchAgent without loading it', t => {
+  const source = fixture(t);
+  const home = scratchDir(t, 'quorum-installer-home-');
   execFileSync(process.execPath, [script, '--platform', 'darwin', '--source', source, '--home', home, '--port', '4878', '--install'], { encoding: 'utf8' });
   const plistPath = join(home, 'Library', 'LaunchAgents', 'com.tridentsocial.quorum.plist');
   const plist = readFileSync(plistPath, 'utf8');
@@ -41,17 +41,17 @@ test('installer writes a client-specific LaunchAgent without loading it', () => 
   assert.match(plist, /<key>RunAtLoad<\/key><true\/>/);
 });
 
-test('installer refuses to overwrite an existing agent unless explicitly replaced', () => {
-  const source = fixture();
-  const home = mkdtempSync(join(tmpdir(), 'quorum-installer-home-'));
+test('installer refuses to overwrite an existing agent unless explicitly replaced', t => {
+  const source = fixture(t);
+  const home = scratchDir(t, 'quorum-installer-home-');
   const args = [script, '--source', source, '--home', home, '--install'];
   execFileSync(process.execPath, args, { encoding: 'utf8' });
   assert.throws(() => execFileSync(process.execPath, args, { encoding: 'utf8', stdio: 'pipe' }), /already exists/);
 });
 
-test('Linux dry-run produces a user systemd unit without writing or registering it', () => {
-  const source = fixture();
-  const home = mkdtempSync(join(tmpdir(), 'quorum-installer-linux-home-'));
+test('Linux dry-run produces a user systemd unit without writing or registering it', t => {
+  const source = fixture(t);
+  const home = scratchDir(t, 'quorum-installer-linux-home-');
   const output = execFileSync(process.execPath, [script, '--platform', 'linux', '--source', source, '--home', home, '--port', '4880'], { encoding: 'utf8' });
   const plan = JSON.parse(output.slice(output.indexOf('{'), output.indexOf('\nNo files were written')));
   assert.equal(plan.serviceType, 'systemd-user');
@@ -60,9 +60,9 @@ test('Linux dry-run produces a user systemd unit without writing or registering 
   assert.match(output, /systemctl --user daemon-reload/);
 });
 
-test('Windows dry-run produces a least-privilege scheduled-task artifact', () => {
-  const source = fixture();
-  const home = mkdtempSync(join(tmpdir(), 'quorum-installer-windows-home-'));
+test('Windows dry-run produces a least-privilege scheduled-task artifact', t => {
+  const source = fixture(t);
+  const home = scratchDir(t, 'quorum-installer-windows-home-');
   const output = execFileSync(process.execPath, [script, '--platform', 'win32', '--source', source, '--home', home, '--port', '4881'], { encoding: 'utf8' });
   const plan = JSON.parse(output.slice(output.indexOf('{'), output.indexOf('\nNo files were written')));
   assert.equal(plan.serviceType, 'scheduled-task');

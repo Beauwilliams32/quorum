@@ -524,6 +524,13 @@ export class RoundtableRegistry {
     this.state = state
     this.live = new Map()   // roomId -> Roundtable
     this.recent = []        // finished snapshots, newest first
+    this.doneListeners = new Set()
+  }
+
+  /** Call `listener(snapshot)` when any debate finishes, cancelled or not. Returns an unsubscribe. */
+  onDone(listener) {
+    this.doneListeners.add(listener)
+    return () => this.doneListeners.delete(listener)
   }
 
   start(opts) {
@@ -539,6 +546,9 @@ export class RoundtableRegistry {
       this.recent.unshift(snap)
       if (this.recent.length > 20) this.recent.pop()
       this.state.broadcast({ type: 'rt.done', debate: snap })
+      for (const listener of this.doneListeners) {
+        try { listener(snap) } catch { /* a listener must never lose the debate record */ }
+      }
     })
     return rt
   }

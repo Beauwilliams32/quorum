@@ -44,3 +44,9 @@ test('health distinguishes CLI and environment API-key roundtable readiness', ()
   assert.equal(both.readiness.roundtable, 'ready-cli-and-api-key')
   assert.equal(apiKey.readiness.roundtable, 'ready-api-key')
 })
+
+test('health preserves OpenClaw reachability versus authentication state', () => {
+  const health = buildHealth({ services: { hermes: { up: true }, openclaw: { up: true } }, openclaw: { connectionState: 'auth-required' } })
+  assert.equal(health.services.openclaw, true)
+  assert.equal(health.readiness.openclaw, 'auth-required')
+})

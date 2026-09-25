@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { summarizeConnections } from '../src/collectors/composio.js'
+import { byClass, elements, text } from './helpers/markup.mjs'
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const APP = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8')
@@ -44,8 +45,26 @@ test('renderComposio escapes toolkit names from the connections payload', () => 
   render()
 
   const html = nodes['composio-card'].innerHTML
-  assert.match(html, /ambiguous/)
-  assert.match(html, /active/)
-  assert.ok(!html.includes('<img'), 'toolkit name rendered as live markup')
-  assert.equal(html.split('&lt;img src=x onerror=alert(1)&gt;').length - 1, 2)
+  assert.match(text(html), /ambiguous/)
+  assert.match(text(html), /active/)
+
+  // The toolkit name must arrive as TEXT. Parsing the result rather than
+  // string-matching it means a future markup change cannot accidentally pass:
+  // no <img> element may exist, and the name must be readable as text twice —
+  // once in the ambiguous row, once in the per-status row.
+  assert.deepEqual(elements(html).filter(el => el.tag === 'img'), [],
+    'toolkit name rendered as live markup')
+  assert.equal(text(html).split(hostile).length - 1, 2, 'the name appears twice, as text')
+  // The card is built out of `row(label, value)` pairs. Assert which rows the
+  // card actually produced: "the card rendered something" was true of any
+  // output containing a single tag, which is no assertion at all in a test
+  // whose point is that string-matching was replaced by real parsing.
+  const starts = byClass(html, 'row').map(el => el.index)
+  const chunks = starts.map((start, i) => html.slice(start, starts[i + 1] ?? html.length))
+  const labels = chunks.map(chunk => text(chunk.slice(chunk.indexOf('<span>'), chunk.indexOf('</span>'))))
+  assert.deepEqual(labels, ['cli', 'tool defs', 'ambiguous', 'active'],
+    'the card reports the CLI, the tool-def count, the ambiguous toolkit and its status')
+  // No key material is rendered: there is no fingerprint on this stub state,
+  // and no row may carry one.
+  assert.doesNotMatch(html, /key fp/)
 })

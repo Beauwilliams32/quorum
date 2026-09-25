@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { newJobId, repurposeVideo, verifyVideo } from '../scripts/pipeline/pipeline.mjs'
+import { scratchDir } from './helpers/scratch.mjs'
 
 const FFMPEG = 'ffmpeg'
 const HAS_FFMPEG = (() => {
@@ -59,8 +59,8 @@ test('verifyVideo rejects missing file on disk', async () => {
 // the binary so the suite remains green in CI; the wrapper-level checks above
 // still cover the contract.
 const integrationTest = HAS_FFMPEG ? test : test.skip
-integrationTest('repurposeVideo converts a landscape clip to vertical shorts and verifies them', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-pipeline-'))
+integrationTest('repurposeVideo converts a landscape clip to vertical shorts and verifies them', async t => {
+  const root = scratchDir(t, 'quorum-pipeline-')
   const input = path.join(root, 'source.mp4')
   const workDir = path.join(root, 'job')
   makeLandscapeVideo(input, { duration: 6 })

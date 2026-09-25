@@ -11,10 +11,15 @@
       "permissionMode": "acceptEdits"
     },
     "operator": {
-      "capabilities": ["discover", "read", "test", "edit", "git.commit", "git.push", "git.merge", "git.tag", "deploy", "publish", "provider.change", "external.send", "migration.remote"],
+      "capabilities": ["discover", "read", "test", "edit", "git.commit", "git.push", "git.merge", "git.tag", "deploy", "publish", "provider.change", "external.send", "migration.remote", "secret.change", "financial.execute"],
       "permissionMode": "acceptEdits"
     },
+    "reviewer": {
+      "capabilities": ["discover", "read", "test"],
+      "permissionMode": "plan"
+    },
     "recovery": {
+
       "capabilities": ["discover", "read", "recovery.inspect", "recovery.takeover"],
       "permissionMode": "plan"
     }
@@ -28,11 +33,13 @@
     "git.push": { "capability": "git.push", "verification": "remote-head" },
     "git.merge": { "capability": "git.merge", "verification": "git-status" },
     "git.tag": { "capability": "git.tag", "verification": "tag-exists" },
-    "deploy": { "capability": "deploy", "verification": "post-deploy-probe", "approval": "target-record" },
-    "publish": { "capability": "publish", "verification": "post-publish-probe", "approval": "target-record" },
-    "provider.change": { "capability": "provider.change", "verification": "provider-readback", "approval": "target-record" },
-    "external.send": { "capability": "external.send", "verification": "provider-readback", "approval": "target-record" },
-    "migration.remote": { "capability": "migration.remote", "verification": "migration-readback", "approval": "target-record" }
+    "deploy": { "capability": "deploy", "verification": "post-deploy-probe", "approval": "target-record", "requiresIdempotencyKey": true, "postActionReadback": true },
+    "publish": { "capability": "publish", "verification": "post-publish-probe", "approval": "target-record", "requiresIdempotencyKey": true, "postActionReadback": true },
+    "provider.change": { "capability": "provider.change", "verification": "provider-readback", "approval": "target-record", "requiresIdempotencyKey": true, "postActionReadback": true },
+    "external.send": { "capability": "external.send", "verification": "provider-readback", "approval": "target-record", "requiresIdempotencyKey": true, "postActionReadback": true },
+    "migration.remote": { "capability": "migration.remote", "verification": "migration-readback", "approval": "target-record", "requiresIdempotencyKey": true, "postActionReadback": true },
+    "secret.change": { "capability": "secret.change", "verification": "secret-reference-readback", "approval": "target-record", "requiresIdempotencyKey": true, "postActionReadback": true },
+    "financial.execute": { "capability": "financial.execute", "verification": "financial-readback", "approval": "target-record", "requiresIdempotencyKey": true, "postActionReadback": true }
   },
   "protectedPaths": [
     "~/.codex/auth.json",
@@ -49,6 +56,8 @@
     "heartbeatSeconds": 120,
     "ttlSeconds": 900,
     "recoveryMisses": 3,
+    "maxRecoveryDepth": 1,
+    "maxLivenessProbesPerSweep": 32,
     "maxClaimedPaths": 40
   },
   "retries": {

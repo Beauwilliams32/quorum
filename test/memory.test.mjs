@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { buildMemory } from '../src/collectors/memory.js'
+import { scratchDir } from './helpers/scratch.mjs'
 
-async function fixture() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'uao-memory-test-'))
+async function fixture(t) {
+  const dir = scratchDir(t, 'uao-memory-test-')
   const root = path.join(dir, 'agent-memory-bridge')
   const vault = path.join(dir, 'vault')
   await fs.mkdir(root, { recursive: true })
@@ -33,8 +33,8 @@ async function fixture() {
   return { root }
 }
 
-test('buildMemory summarizes bridge config, ledger, inbox, and status note', async () => {
-  const { root } = await fixture()
+test('buildMemory summarizes bridge config, ledger, inbox, and status note', async t => {
+  const { root } = await fixture(t)
   const status = buildMemory(root)
 
   assert.equal(status.ok, true)
@@ -47,8 +47,8 @@ test('buildMemory summarizes bridge config, ledger, inbox, and status note', asy
   assert.equal(status.statusNote.exists, true)
 })
 
-test('buildMemory flags drift and non-loopback source', async () => {
-  const { root } = await fixture()
+test('buildMemory flags drift and non-loopback source', async t => {
+  const { root } = await fixture(t)
   const configPath = path.join(root, 'config.json')
   const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
   config.memBaseUrl = 'https://example.com'

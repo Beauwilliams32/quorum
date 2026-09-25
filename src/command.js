@@ -42,15 +42,20 @@ export function previewAction(input = {}, catalog, state, ptys) {
     if (!pty || pty.exited) throw new Error('session is not a tracked PTY')
     return { action, summary: `Stop tracked ${pty.profile} session ${pty.id}`, ptyId: pty.id }
   }
+  // `route` and `chain` validate their input and then write a feed entry.
+  // Nothing is launched, routed or orchestrated by either one. They used to
+  // present themselves as "Route X to Y" and "Run approved chain Z", which
+  // reads as an action; the summary now says what actually happens, and
+  // `executes: false` lets a caller refuse to render them as commands.
   if (action === 'route') {
     const room = (state.data.projects?.rooms || []).find(r => r.id === input.roomId)
     if (!room) throw new Error('unknown project room')
     if (!catalog.models.some(m => m.id === input.modelId || m.harnessId === input.modelId)) throw new Error('unknown catalog model')
-    return { action, summary: `Route ${input.modelId} to ${room.label}`, roomId: room.id, modelId: input.modelId }
+    return { action, executes: false, summary: `Record a note that ${input.modelId} is the intended model for ${room.label} — this writes a log entry and starts nothing`, roomId: room.id, modelId: input.modelId }
   }
   if (action === 'chain') {
     if (!chains.has(input.chainId) || !Array.isArray(input.steps) || input.steps.length < 2 || input.steps.some(step => typeof step !== 'string')) throw new Error('chain is not an approved orchestration sequence')
-    return { action, summary: `Run approved chain ${input.chainId}`, chainId: input.chainId, steps: input.steps.slice(0, 8) }
+    return { action, executes: false, summary: `Record the approved chain ${input.chainId} — this writes a log entry and runs no step`, chainId: input.chainId, steps: input.steps.slice(0, 8) }
   }
   const cfg = validateConfig(input.config)
   if (!cfg.ok) throw new Error(cfg.errors.join('; '))
@@ -62,11 +67,14 @@ export function executeAction(preview, input, { state, ptys, startPty }) {
   if (preview.action === 'launch') {
     const rec = startPty(preview.runtimeId, input.roomId, preview.launch || null)
     state.event({ kind: 'command', text: `${preview.packId ? `task ${preview.packId}` : 'launch'} confirmed → ${preview.runtimeId} in ${input.roomId}` })
-    return { ok: true, ptyId: rec.id }
+    return { ok: true, executed: true, ptyId: rec.id }
   }
   if (preview.action === 'stop') { ptys.kill(preview.ptyId); state.event({ kind: 'command', text: `stop confirmed → ${preview.ptyId}` }); return { ok: true } }
-  if (preview.action === 'route') { state.event({ kind: 'command', text: `route confirmed → ${preview.modelId} to ${preview.roomId}` }); return { ok: true } }
-  if (preview.action === 'chain') { state.event({ kind: 'command', text: `chain confirmed → ${preview.chainId}` }); return { ok: true, chainId: preview.chainId } }
+  // Both of these record and return. Saying `executed: false` in the response
+  // is the difference between a cockpit that logs an intention and one that
+  // claims to have carried it out.
+  if (preview.action === 'route') { state.event({ kind: 'command', text: `route recorded (no execution) → ${preview.modelId} for ${preview.roomId}` }); return { ok: true, recorded: true, executed: false, note: 'routing preference recorded; nothing was launched' } }
+  if (preview.action === 'chain') { state.event({ kind: 'command', text: `chain recorded (no execution) → ${preview.chainId}` }); return { ok: true, recorded: true, executed: false, chainId: preview.chainId, note: 'chain recorded; no step was run' } }
   const file = CONFIG_PATH
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, JSON.stringify(preview.config, null, 2) + '\n', { mode: 0o600 })

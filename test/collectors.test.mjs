@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { shortName } from '../src/collectors/processes.js'
 import { buildAgents } from '../src/collectors/agents.js'
@@ -11,8 +10,9 @@ import { probeComfy } from '../src/collectors/services.js'
 import { tailBytes, jsonLines } from '../src/util.js'
 import { loadRuntimes, loadModels, BUILTIN_RUNTIMES, BUILTIN_MODELS } from '../src/config.js'
 import { lockedMember, LOCKED_CAST } from '../src/cast-locked.js'
+import { scratchDir } from './helpers/scratch.mjs'
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-test-'))
+const tmp = t => scratchDir(t, 'quorum-test-')
 
 test('shortName classifies the command lines the cockpit sees', () => {
   assert.equal(shortName('/usr/bin/python3 /x/ComfyUI/main.py --listen'), 'ComfyUI server')
@@ -25,8 +25,8 @@ test('shortName classifies the command lines the cockpit sees', () => {
   assert.equal(shortName('/bin/zsh -l'), 'zsh')
 })
 
-test('buildAgents keeps only live sessions and never reports a socket it cannot see', () => {
-  const dir = tmp()
+test('buildAgents keeps only live sessions and never reports a socket it cannot see', t => {
+  const dir = tmp(t)
   fs.writeFileSync(path.join(dir, 'live.json'), JSON.stringify({
     pid: process.pid, sessionId: 'abc12345-0000', name: 'me', cwd: '/tmp', status: 'busy',
     statusUpdatedAt: 5, messagingSocketPath: path.join(dir, 'missing.sock'),
@@ -43,8 +43,8 @@ test('buildAgents keeps only live sessions and never reports a socket it cannot 
   assert.deepEqual(buildAgents(path.join(dir, 'nope')).agents, [])
 })
 
-test('buildTasks aggregates per-session task files, joins live sessions and orders by status', () => {
-  const dir = tmp()
+test('buildTasks aggregates per-session task files, joins live sessions and orders by status', t => {
+  const dir = tmp(t)
   const s1 = path.join(dir, 'sess-1'), s2 = path.join(dir, 'sess-2')
   fs.mkdirSync(s1); fs.mkdirSync(s2)
   fs.writeFileSync(path.join(s1, '1.json'), JSON.stringify({ id: 1, subject: 'done thing', status: 'completed' }))
@@ -69,8 +69,8 @@ test('buildTasks aggregates per-session task files, joins live sessions and orde
   assert.deepEqual(buildTasks({}, path.join(dir, 'missing')).tasks, [])
 })
 
-test('TranscriptWatcher refuses files outside the session directories', () => {
-  const dir = tmp()
+test('TranscriptWatcher refuses files outside the session directories', t => {
+  const dir = tmp(t)
   const file = path.join(dir, 'x.jsonl')
   fs.writeFileSync(file, '{}\n')
   const w = new TranscriptWatcher({ readyState: 1, send() {} })
@@ -79,8 +79,8 @@ test('TranscriptWatcher refuses files outside the session directories', () => {
   w.stop()
 })
 
-test('tailBytes and jsonLines read partial transcripts defensively', () => {
-  const dir = tmp()
+test('tailBytes and jsonLines read partial transcripts defensively', t => {
+  const dir = tmp(t)
   const file = path.join(dir, 't.jsonl')
   fs.writeFileSync(file, '{"a":1}\n{"b":2}\n{"c":')
   assert.equal(tailBytes(file, 5), '{"c":')

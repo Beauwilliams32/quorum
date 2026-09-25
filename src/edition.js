@@ -2,9 +2,13 @@
 //
 // Two independent things have to be true for the Pro cast to appear: the Pro
 // module has to be present on disk (it is absent from the open-core repo), and
-// a valid licence has to verify. Either one missing means free edition — with a
-// reason the UI can show, because "why is Sable greyed out" is the single most
-// likely support question and it should answer itself.
+// a correctly signed licence has to verify. Either one missing means free
+// edition — with a reason the UI can show, because "why is Sable greyed out" is
+// the single most likely support question and it should answer itself.
+//
+// A signed licence past its `expires` date is still valid here: expiry closes
+// the update window, it never revokes the purchased features. `editionInfo()`
+// surfaces `updatesExpired` / `updatesUntil` so the cockpit can say so.
 //
 // Custom cast authoring is a Pro feature and it loads from the same place, so a
 // buyer can add their own specialists without editing the source.
@@ -15,7 +19,7 @@ import { LOCKED_CAST } from './cast-locked.js'
 import { readLicence, verifyLicence, publicLicenceInfo } from './licence.js'
 import { findFile } from './paths.js'
 
-const state = { tier: 'free', reason: 'not loaded', licence: null, custom: 0 }
+const state = { tier: 'free', reason: 'not loaded', licence: null, custom: 0, updatesUntil: null, updatesExpired: false }
 
 /**
  * Resolve the edition and register whatever it unlocks. Call once, before the
@@ -28,7 +32,11 @@ export async function loadEdition() {
   state.tier = result.tier
   state.reason = result.reason
   state.licence = publicLicenceInfo(result)
+  state.updatesUntil = result.updatesUntil ?? null
+  state.updatesExpired = !!result.updatesExpired
 
+  // `valid` is true for an expired-but-signed licence too; only a missing,
+  // tampered or foreign licence fails verification.
   if (result.valid) {
     // The Pro module is genuinely absent in the open-core build, so a failed
     // import is the expected path there, not an error worth surfacing.
@@ -96,6 +104,13 @@ export function editionInfo() {
     reason: state.reason,
     licence: state.licence,
     customCount: state.custom,
+    // Expiry bounds updates, not access: a Pro licence past `expires` stays
+    // Pro, and the UI says "updates ended <date>" instead of dropping to free.
+    updatesUntil: state.updatesUntil,
+    updatesExpired: state.updatesExpired,
+    updatesNote: state.updatesExpired && state.updatesUntil
+      ? `updates ended ${state.updatesUntil} — this licence keeps the version it was bought for`
+      : null,
     // Advertised but unusable in the free edition — the UI greys these out.
     locked: state.tier === 'pro' ? [] : LOCKED_CAST,
   }

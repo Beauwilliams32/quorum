@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { debateToMarkdown } from '../src/decision-record.js'
+import { debateToHtml, debateToMarkdown } from '../src/decision-record.js'
 
 const turn = (o) => ({
   speaker: 'vex', speakerName: 'Vex', speakerRole: 'Architect',
@@ -22,6 +22,15 @@ const debate = {
     turn({ speaker: 'nib', speakerName: 'Nib', speakerRole: 'Moderator', phase: 'verdict', body: 'Retry with a bounded backoff.' }),
   ],
 }
+
+test('the HTML export is self-contained and redacts persona prompts', () => {
+  const html = debateToHtml({ ...debate, turns: [...debate.turns, { speaker: 'vex', speakerName: 'Vex', speakerRole: 'Architect', phase: 'opening', body: 'argument', position: 'ship', confidence: 80, prompt: 'PRIVATE PERSONA PROMPT', failed: false }] })
+  assert.match(html, /QUORUM · ROUNDTABLE/)
+  assert.match(html, /Retry failed posts automatically\?/)
+  assert.doesNotMatch(html, /download/i)
+  assert.doesNotMatch(html, /PRIVATE PERSONA PROMPT/)
+  assert.match(html, /MOVEMENT/)
+})
 
 test('the record leads with the verdict', () => {
   const md = debateToMarkdown(debate)

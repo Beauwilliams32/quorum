@@ -42,9 +42,10 @@ export function buildOperations(stateData = {}, feed = [], ptys = [], catalog = 
     capabilityMap.set(capability, entry)
   }
   const services = stateData.services || {}
+  const openclaw = stateData.openclaw || services.openclaw || {}
   const nodes = [
     { id: 'quorum', label: 'Quorum loopback', kind: 'control plane', status: 'ready', detail: '127.0.0.1:4747' },
-    { id: 'openclaw', label: 'OpenClaw Gateway', kind: 'agent gateway', status: services.openclaw?.up ? 'ready' : 'offline', detail: services.openclaw?.port ? `127.0.0.1:${services.openclaw.port}` : '18789' },
+    { id: 'openclaw', label: 'OpenClaw Gateway', kind: 'agent gateway', status: openclaw.connectionState || (openclaw.up ? 'reachable' : 'offline'), detail: openclaw.connectionState === 'connected' ? `127.0.0.1:${openclaw.port || 18789} · authenticated` : openclaw.authState === 'required' ? `127.0.0.1:${openclaw.port || 18789} · auth required` : `127.0.0.1:${openclaw.port || 18789}` },
     { id: 'hermes', label: 'Hermes Gateway', kind: 'local harness', status: services.hermes?.up ? 'ready' : 'offline', detail: '127.0.0.1:8644' },
     { id: 'comfyui', label: 'ComfyUI / Wan', kind: 'media node', status: services.comfy?.up ? 'ready' : 'offline', detail: `127.0.0.1:${services.comfy?.port || 8199}` },
   ]

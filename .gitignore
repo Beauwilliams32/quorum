@@ -16,8 +16,18 @@ dist/
 archive/phase0-coordinator/target/
 archive/phase0-coordinator/node_modules/
 archive/phase0-coordinator/.phase0-proof/
+quorum-city-live.png
+quorum-command-*.png
+quorum-deck-*.png
+quorum-radar-*.png
 
 # Quorum Pro — must never be committed to the public repo
 src/cast-pro.js
+src/fulfilment/gumroad.js
 scripts/issue-licence.mjs
+scripts/fulfil-sale.mjs
+scripts/build-paid-installer.sh
+scripts/gumroad-fulfilment.mjs
+scripts/release-manifest.mjs
+scripts/release-check.mjs
 docs/pro/

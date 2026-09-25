@@ -1,12 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { MissionStore } from '../src/missions.js'
+import { scratchDir } from './helpers/scratch.mjs'
 
-test('mission store preserves dependency graph and durable task state', () => {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-missions-')), 'missions.json')
+test('mission store preserves dependency graph and durable task state', t => {
+  const file = path.join(scratchDir(t, 'quorum-missions-'), 'missions.json')
   const store = new MissionStore(file)
   const mission = store.create({ title: 'Ship index', objective: 'Make local agent memory searchable.', tasks: [
     { id: 'scan', title: 'Scan sources', description: 'Build the metadata index.', worktree: '/tmp/worktree', branch: 'feature/index' },

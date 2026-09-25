@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { loadRuntimes } from '../config.js'
+import { loadRuntimes, loadConfig } from '../config.js'
 import { RUNTIME_ADAPTERS, resolveProviderSpec } from './provider-registry.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -51,6 +51,9 @@ export function detectRuntimes(env = process.env) {
   })
 }
 
+/** Roles launched in the harness's read-only sandbox. Every other role can write. */
+export const READ_ONLY_ROLES = Object.freeze(['researcher', 'recovery', 'reviewer'])
+
 export function buildLaunch({ runtime = 'generic', role = 'researcher', cwd = process.cwd(), argv = [], runtimeSpec = null } = {}) {
   const configured = runtimeSpec || loadRuntimes().find(item => item.id === runtime)
   const spec = resolveProviderSpec(runtime, RUNTIMES[runtime] || configured) || configured || { command: runtime, label: runtime }
@@ -58,7 +61,10 @@ export function buildLaunch({ runtime = 'generic', role = 'researcher', cwd = pr
   if (!command) throw new Error('missing runtime command')
   const args = argv.length ? argv.slice(1) : []
   const promptFile = path.join(ROOT, 'prompts', 'agent-system.md')
-  const readOnly = role === 'researcher' || role === 'recovery'
+  // A reviewer exists to judge work, not to change it, so it gets the same
+  // read-only sandbox as a researcher. It was previously launched with write
+  // access by omission.
+  const readOnly = READ_ONLY_ROLES.includes(role)
   if (runtime === 'claude' && !args.includes('--append-system-prompt-file')) {
     args.push('--append-system-prompt-file', promptFile, spec.safeLaunch.permissionFlag, readOnly ? spec.safeLaunch.readOnly : spec.safeLaunch.write)
   }
@@ -130,7 +136,9 @@ export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd 
     args.unshift('-p', prompt || 'Inspect the current task and report the next safe action.')
     if (chosenModel && chosenModel !== 'auto') args.push('--model', chosenModel)
   } else if (runtime === 'ollama') {
-    const localModel = chosenModel && chosenModel !== 'auto' ? chosenModel : 'gemma3:latest'
+    // Prefer the ollama model from ~/.quorum/config.json; never the stale
+    // gemma3:latest stub that is absent when the model volume is unmounted.
+    const localModel = chosenModel && chosenModel !== 'auto' ? chosenModel : (loadConfig().modelMappings?.ollama || 'gemma4:31b-cloud')
     args.unshift('run', localModel, prompt || 'Inspect the current task and report the next safe action.')
   } else if (spec.promptMode === 'arg' && spec.promptFlag) {
     args.push(spec.promptFlag, prompt || 'Inspect the current task and report the next safe action.')

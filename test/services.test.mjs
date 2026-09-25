@@ -1,42 +1,33 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { apiKeyAvailable, commandAvailable, resolveClaudeCommand, resolveRoundtableAuth } from '../src/collectors/services.js'
+import { scratchDir } from './helpers/scratch.mjs'
 
-test('commandAvailable reports only executable bare commands on the supplied path', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-runtime-'))
+test('commandAvailable reports only executable bare commands on the supplied path', t => {
+  const dir = scratchDir(t, 'quorum-runtime-')
   const cli = path.join(dir, 'quorum-test-cli')
-  try {
-    fs.writeFileSync(cli, '#!/bin/sh\n')
-    fs.chmodSync(cli, 0o755)
-    assert.equal(commandAvailable('quorum-test-cli', dir), true)
-    assert.equal(commandAvailable('missing-cli', dir), false)
-    assert.equal(commandAvailable('../quorum-test-cli', dir), false)
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
+  fs.writeFileSync(cli, '#!/bin/sh\n')
+  fs.chmodSync(cli, 0o755)
+  assert.equal(commandAvailable('quorum-test-cli', dir), true)
+  assert.equal(commandAvailable('missing-cli', dir), false)
+  assert.equal(commandAvailable('../quorum-test-cli', dir), false)
 })
 
-test('resolveClaudeCommand finds an executable on PATH and a local SDK fallback', () => {
-  const pathDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-claude-path-'))
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-claude-home-'))
+test('resolveClaudeCommand finds an executable on PATH and a local SDK fallback', t => {
+  const pathDir = scratchDir(t, 'quorum-claude-path-')
+  const home = scratchDir(t, 'quorum-claude-home-')
   const cli = path.join(pathDir, 'claude')
   const sdk = path.join(home, 'CLAUDE', 'claude-mem', 'node_modules', '@anthropic-ai', 'claude-agent-sdk-darwin-arm64', 'claude')
-  try {
-    fs.writeFileSync(cli, '#!/bin/sh\n')
-    fs.chmodSync(cli, 0o755)
-    assert.equal(resolveClaudeCommand(pathDir, home), cli)
-    fs.rmSync(cli)
-    fs.mkdirSync(path.dirname(sdk), { recursive: true })
-    fs.writeFileSync(sdk, '#!/bin/sh\n')
-    fs.chmodSync(sdk, 0o755)
-    assert.equal(resolveClaudeCommand('', home), sdk)
-  } finally {
-    fs.rmSync(pathDir, { recursive: true, force: true })
-    fs.rmSync(home, { recursive: true, force: true })
-  }
+  fs.writeFileSync(cli, '#!/bin/sh\n')
+  fs.chmodSync(cli, 0o755)
+  assert.equal(resolveClaudeCommand(pathDir, home), cli)
+  fs.rmSync(cli)
+  fs.mkdirSync(path.dirname(sdk), { recursive: true })
+  fs.writeFileSync(sdk, '#!/bin/sh\n')
+  fs.chmodSync(sdk, 0o755)
+  assert.equal(resolveClaudeCommand('', home), sdk)
 })
 
 test('API-key readiness is a boolean only and requires a nonblank environment value', () => {

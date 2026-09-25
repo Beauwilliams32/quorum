@@ -14,11 +14,13 @@ import { startTasks } from './src/collectors/tasks.js'
 import { startComposio } from './src/collectors/composio.js'
 import { startAgents } from './src/collectors/agents.js'
 import { startMemory } from './src/collectors/memory.js'
-import { startArtifacts, reindexArtifacts, searchArtifacts, readArtifact, openArtifact, openDirectory } from './src/artifacts.js'
+import { startArtifacts, reindexArtifacts, buildArtifactState, searchArtifacts, readArtifact, openArtifact, openDirectory } from './src/artifacts.js'
+import { checkRepositories } from './src/collectors/repositories.js'
 import { MissionStore, publicMission } from './src/missions.js'
 import { stampPresence } from './src/presence.js'
 import { PtyManager } from './src/pty.js'
 import { withinDir, isAllowedOrigin } from './src/util.js'
+import { runStructuredVerification, reviewTaskPrompt } from './src/agent-control/verification-run.js'
 import { buildHealth } from './src/health.js'
 import { publicCast } from './src/cast.js'
 import { loadEdition, editionInfo } from './src/edition.js'
@@ -26,7 +28,7 @@ import { loadRuntimes, loadModels } from './src/config.js'
 import { buildCatalog, publicCatalog, roundtableModelOptions } from './src/catalog.js'
 import { executeAction, previewAction } from './src/command.js'
 import { RoundtableRegistry, EST_COST_PER_TURN_USD, resolveModelRef } from './src/roundtable.js'
-import { debateToMarkdown } from './src/decision-record.js'
+import { debateToHtml, debateToMarkdown } from './src/decision-record.js'
 import { buildOperations } from './src/operations.js'
 import { AgentControlManager } from './src/agent-control/manager.js'
 import { publicAgentPacks, resolveAgentPack } from './src/agents/packs.js'
@@ -38,6 +40,10 @@ import { listServices, platformCapabilities, ProcessController } from './src/pla
 import { StandingJobScheduler } from './src/standing-jobs.js'
 import { buildCityState } from './src/city-state.js'
 import { OpenClawBridge } from './src/openclaw-bridge.js'
+import { QuorumGateway } from './src/quorum-gateway.js'
+import { Hq, HqError } from './src/hq/service.js'
+import { validateVerifyCommand } from './src/validate.js'
+import { dataDir } from './src/paths.js'
 import { repurposeVideo as runPipelineRepurpose, verifyVideo as runPipelineVerify, generateVariants as runPipelineVariants, fetchAsset as runPipelineAsset, newJobId } from './scripts/pipeline/pipeline.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -60,17 +66,29 @@ const MIME = {
   '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp', '.json': 'application/json', '.map': 'application/json',
 }
 
+// Runtimes whose adapters emit machine-readable events (`claude -p
+// --output-format stream-json`, `codex exec --json`). Mission dispatch accepts
+// only these, because a mission task's completion has to be read from parsed
+// provider output rather than guessed from a terminal's exit code.
+const STRUCTURED_MISSION_RUNTIMES = ['claude', 'codex']
+
+// How long an independent verification run may take before it is stopped and
+// recorded as "no decision". The previous reviewer had no bound at all.
+const REVIEW_TIMEOUT_MS = Math.max(60_000, Math.min(Number(process.env.QUORUM_REVIEW_TIMEOUT_MS) || 10 * 60 * 1000, 60 * 60 * 1000))
+const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 400)
+
 const state = new State()
 const ptys = new PtyManager(state)
 const roundtables = new RoundtableRegistry(state)
 const agentControl = new AgentControlManager()
 const missions = new MissionStore()
 const memoryBridge = new MemoryBridge()
-const runtimeManager = new RuntimeManager({ agentControl, missions, memoryBridge, state })
+const runtimeManager = new RuntimeManager({ agentControl, missions, memoryBridge, state, reviewImpl: (...args) => reviewManagedRun(...args) })
 const processController = new ProcessController({ resolveProcess: pid => (state.data.processes?.inventory || []).find(item => item.pid === Number(pid)) || null })
 const standingJobs = new StandingJobScheduler()
 const pipelineJobs = new Map()
 const PIPELINE_JOB_LIMIT = 50
+const ARTIFACT_SYNC_RESPONSE_BUDGET_MS = 750
 let platformServices = []
 roundtables.loadArchive()
 const supervisedRuns = new Map()
@@ -92,15 +110,65 @@ async function readJson(req) {
 }
 
 function refreshAgentControl() { state.update('agentControl', agentControl.snapshot()) }
+// Runs created before process binding existed can never be recovered — they
+// were never bound to a process. Retire them once, loudly, with the state file
+// backed up inside ~/.quorum first. Nothing is deleted.
+try {
+  const reconciled = agentControl.reconcilePhantomRuns({ log: message => console.log(message) })
+  if (!reconciled.skipped && reconciled.count) state.event({ kind: 'agent', text: `reconciled ${reconciled.count} ownerless run(s); backup ${reconciled.backup || 'unavailable'}` })
+} catch (error) { console.warn(`agent-control: phantom-run reconciliation skipped — ${error.message || error}`) }
 refreshAgentControl()
 
 function refreshMissions() {
   state.update('missions', { missions: missions.list().map(publicMission), ts: Date.now() })
 }
 refreshMissions()
-state.update('runtimeRuns', { runs: runtimeManager.snapshot(), ts: Date.now() })
+state.update('runtimeRuns', { runs: runtimeManager.snapshot(), cloudBudget: runtimeManager.budgetStatus(), ts: Date.now() })
 state.update('memoryBridge', memoryBridge.status())
 state.update('standingJobs', standingJobs.snapshot())
+
+// Quorum HQ: the company (org chart, goals, tickets, budgets, heartbeats) and
+// the room (channels, @mentions, signed replies). It executes nothing itself —
+// a ticket becomes a mission and a managed run through the stores above, so
+// the evidence gate, the reviewer and the daily ceiling still decide "done".
+const shellWord = value => /^[\w@%+=:,./-]+$/.test(String(value)) ? String(value) : `'${String(value).replace(/'/g, `'\\''`)}'`
+const hq = new Hq({
+  dir: process.env.QUORUM_HQ_DIR || dataDir('hq'),
+  missions,
+  runtimeManager,
+  agentControl,
+  rooms: () => (state.data.projects?.rooms || []).map(room => ({ id: room.id, label: room.label, cwd: room.cwd })),
+  runtimes: () => (buildCatalog().runtimes || []).map(runtime => ({ id: runtime.id, label: runtime.label, available: runtime.available !== false })),
+  resolvePack: resolveAgentPack,
+  validateVerify: validateVerifyCommand,
+  cli: `${shellWord(process.execPath)} ${shellWord(path.join(__dirname, 'bin', 'quorum'))}`,
+  baseUrl: `http://127.0.0.1:${PORT}`,
+  onChange: snapshot => state.update('hq', snapshot),
+  roundtable: {
+    estimate: ({ participants, model }) => {
+      const selection = resolveModelRef(model || 'claude:sonnet')
+      const option = roundtableModelOptions({ catalog: buildCatalog() }).find(item => item.id === selection.ref)
+      const turns = 2 + participants.length * 3
+      return { model: selection.ref, turns, estimateUsd: Math.round(turns * (option?.estimatedCostUsd ?? EST_COST_PER_TURN_USD) * 100) / 100, available: option?.available === true, local: option?.local === true, label: option?.label || selection.ref }
+    },
+    start: ({ topic, participants, model, roomId }) => startRoundtable({ topic, participants, model, roomId }),
+  },
+})
+state.update('hq', hq.snapshot())
+roundtables.onDone(debate => { try { hq.roundtableDone(debate) } catch { /* the debate record is already saved */ } })
+let hqRoomKey = ''
+state.subscribe(message => {
+  if (message.type !== 'update') return
+  if (message.key === 'missions') hq.scheduleReconcile()
+  if (message.key === 'runtimeRuns') { hq.scheduleReconcile(); hq.refresh() }
+  if (message.key === 'projects') {
+    const key = (message.data?.rooms || []).map(room => room.id).join('|')
+    if (key !== hqRoomKey) { hqRoomKey = key; hq.refresh() }
+  }
+})
+// tick() reports its own failures in #ops; this catch only keeps a bug from
+// becoming an unhandled rejection that takes the cockpit down.
+setInterval(() => { hq.tick().catch(error => console.error(`HQ tick failed: ${error?.message || error}`)) }, 15_000).unref?.()
 
 function refreshCity() { state.update('city', buildCityState(state.data, standingJobs.snapshot(), platformServices)) }
 async function refreshPlatformServices() { platformServices = await listServices(); state.update('platformServices', { schemaVersion: 1, services: platformServices, capabilities: platformCapabilities(), ts: Date.now() }); refreshCity() }
@@ -110,10 +178,47 @@ const openclawBridge = new OpenClawBridge({
 })
 state.update('openclaw', openclawBridge.snapshot())
 void openclawBridge.start()
+// Quorum is also a first-class OpenClaw Gateway peer. The browser continues to
+// use the legacy `/ws` channel for PTYs and city UI state; protocol clients use
+// `/gateway`, which is authenticated and only exposes bounded projections plus
+// the preview/confirm action broker.
+const quorumGateway = new QuorumGateway({
+  state,
+  originAllowed: origin => !origin || isAllowedOrigin(origin, PORT),
+  openclawActions: {
+    preview: input => openclawBridge.previewAction(input),
+    confirm: previewId => openclawBridge.confirmAction(previewId),
+    cancel: previewId => openclawBridge.cancelAction(previewId),
+  },
+})
 standingJobs.register('runtime-health', async () => ({ attention: !(state.data.services?.claude?.up || state.data.processes?.groups?.codex), detail: 'runtime inventory checked' }))
 standingJobs.register('daemon-health', async () => ({ attention: platformServices.some(item => item.state === 'error'), detail: `${platformServices.length} services observed` }))
 standingJobs.register('memory-maintenance', async () => ({ attention: !state.data.memory?.ok, detail: state.data.memory?.ok ? 'memory index healthy' : 'memory index needs attention' }))
-standingJobs.register('failed-run-recovery', async () => { const recovered = agentControl.recover({ now: Date.now() }); if (recovered.length) refreshAgentControl(); return { attention: recovered.length > 0, detail: recovered.length ? `${recovered.length} recovery lease created` : 'no stale runs' } })
+standingJobs.register('repository-health', async () => {
+  const rooms = state.data.projects?.rooms || []
+  const result = checkRepositories(rooms)
+  return { attention: result.attention, detail: result.detail }
+})
+standingJobs.register('artifact-organization', async () => {
+  const artifacts = buildArtifactState()
+  const blind = (artifacts.roots || []).filter(root => root.readable === false)
+  const parts = [
+    `${artifacts.stats?.total ?? 0} artifacts across ${(artifacts.roots || []).length} root(s)`,
+    blind.length ? `${blind.length} root(s) unreadable: ${blind.map(root => root.label).join(', ')}` : '',
+    artifacts.stats?.truncated ? 'index truncated at its file ceiling' : '',
+    artifacts.generatedAt ? '' : 'index has not been built yet',
+  ].filter(Boolean)
+  return { attention: blind.length > 0 || Boolean(artifacts.stats?.truncated) || !artifacts.generatedAt, detail: parts.join(' · ') }
+})
+// build-health, security-review and deployment-readiness are deliberately left
+// unregistered: nothing here runs a build, an audit or a deploy probe, and the
+// scheduler now reports them as "not monitored" rather than green.
+standingJobs.register('failed-run-recovery', async () => {
+  const { recovered, abandoned } = agentControl.recover({ now: Date.now() })
+  if (recovered.length || abandoned.length) refreshAgentControl()
+  const parts = [recovered.length ? `${recovered.length} recovery lease created` : '', abandoned.length ? `${abandoned.length} ownerless run abandoned` : ''].filter(Boolean)
+  return { attention: recovered.length > 0, detail: parts.join(' · ') || 'no stale runs' }
+})
 standingJobs.start(snapshot => { state.update('standingJobs', snapshot); refreshCity() })
 void refreshPlatformServices()
 setInterval(() => { void refreshPlatformServices() }, 30_000).unref?.()
@@ -131,8 +236,74 @@ function emitAgentEvent(type, run) {
   state.broadcast({ type, run: { id: run.runId, status: run.status, phase: run.phase, heartbeatAt: run.heartbeatAt, leaseExpiresAt: run.leaseExpiresAt, packId: run.packId, runtime: run.runtime } })
 }
 
+/**
+ * Independent review of a managed run that has already passed the evidence
+ * gate. This is the `reviewImpl` the runtime manager calls; it decides
+ * nothing about the mission task itself, so there is exactly one writer of
+ * task status (the runtime manager) and a reviewer cannot race it.
+ *
+ * It used to hang off `superviseRun` under `run.verified`, and nothing set
+ * `run.verified` any more — so no mission task was ever reviewed while the
+ * feature map said every one was. It is now on the only path a mission task
+ * can take.
+ */
+async function reviewManagedRun({ runId, missionId, taskId, cwd, worktree }) {
+  const subject = agentControl.getRun(runId)
+  const repoRoot = subject?.repoRoot || cwd
+  const reviewCwd = worktree || subject?.worktree || repoRoot
+  state.event({ kind: 'mission', text: `independent review of task ${taskId} → run ${runId}` })
+
+  const reviewerRun = agentControl.createRun({
+    missionId,
+    runtime: 'codex',
+    role: 'reviewer',
+    repoRoot,
+    worktree: reviewCwd,
+    parentTask: taskId,
+    packId: 'review',
+    modelRef: 'codex:auto',
+    claimedPaths: [],
+    plannedActions: ['read', 'test'],
+    requiredGates: ['focused diff', 'tests or reproduction', 'severity and owner'],
+  })
+  refreshAgentControl(); emitAgentEvent('agent.run.created', reviewerRun)
+
+  const result = await runStructuredVerification({
+    runtime: 'codex',
+    role: 'reviewer',
+    cwd: reviewCwd,
+    task: reviewTaskPrompt(runId),
+    timeoutMs: REVIEW_TIMEOUT_MS,
+    onPid: pid => { try { agentControl.bindProcess(reviewerRun.runId, pid) } catch { /* audit aid only */ } },
+  })
+
+  const verification = [`review:${result.decision}`, clean(result.reasoning) || 'no reasoning recorded', `exit:${result.exitCode ?? (result.timedOut ? 'timed-out' : 'unknown')}`]
+  try {
+    agentControl.checkpoint(reviewerRun.runId, { reason: result.decision === 'approve' ? 'verification' : 'failure', phase: 'finished', verification })
+    agentControl.close(reviewerRun.runId, {
+      disposition: result.decision === 'approve' ? 'completed' : 'blocked',
+      blockers: result.decision === 'approve' ? [] : [`review ${result.decision}: ${result.reasoning || 'no reasoning recorded'}`],
+      verification,
+      nextOwnerAction: result.decision === 'approve' ? '' : `read run ${reviewerRun.runId} and decide the task yourself`,
+    })
+    refreshAgentControl(); emitAgentEvent('agent.run.closed', agentControl.getRun(reviewerRun.runId))
+  } catch { /* the review outcome still has to reach the mission */ }
+
+  // A review is a real cloud invocation, so it goes in the same ledger the
+  // ceiling is enforced against. `codex exec --json` states no price, so it is
+  // recorded as an unpriced run rather than as a free one.
+  const priced = [...result.events || []].reverse().find(event => typeof event?.costUsd === 'number')
+  runtimeManager.recordCloudSpend({ runId: reviewerRun.runId, runtime: 'codex', costUsd: priced?.costUsd ?? null, missionId, taskId })
+
+  state.event({ kind: 'mission', text: `task ${taskId} review → ${result.decision}` })
+  return { decision: result.decision, reasoning: clean(result.reasoning), reviewerRunId: reviewerRun.runId }
+}
+
 function superviseRun(run, rec) {
   rec.quorumRunId = run.runId
+  // A supervised PTY is the run's owning process: bind it so liveness and
+  // recovery can tell a working run from an ownerless record.
+  try { if (rec.term?.pid) agentControl.bindProcess(run.runId, rec.term.pid) } catch { /* an unbound run is abandoned rather than recovered */ }
   const interval = Math.max(5000, (agentControl.policy.lease?.heartbeatSeconds || 120) * 1000)
   const timer = setInterval(() => {
     try { const updated = agentControl.heartbeat(run.runId, { phase: 'running' }); refreshAgentControl(); emitAgentEvent('agent.run.heartbeat', updated) }
@@ -148,6 +319,9 @@ function superviseRun(run, rec) {
       const closed = agentControl.close(run.runId, { disposition: exitCode === 0 ? 'completed' : 'blocked', blockers: exitCode === 0 ? [] : [`process exit ${exitCode ?? 'unknown'}`], nextOwnerAction: exitCode === 0 ? '' : `inspect run ${run.runId} and resume with a new task` })
       refreshAgentControl(); emitAgentEvent('agent.run.closed', closed)
       void checkpoint
+      // No independent review here: a supervised PTY is an operator's own
+      // interactive session, not a mission task. Mission tasks are reviewed on
+      // the managed path, which is the only way one can be dispatched.
     } catch { /* closeout is best-effort after the PTY exits */ }
   })
 }
@@ -171,6 +345,7 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/api/openclaw/status' && req.method === 'GET') return sendJson(res, 200, openclawBridge.status())
   if (u.pathname === '/api/openclaw/snapshot' && req.method === 'GET') return sendJson(res, 200, openclawBridge.snapshot())
   if (u.pathname === '/api/openclaw/events' && req.method === 'GET') return sendJson(res, 200, { schemaVersion: 1, events: openclawBridge.snapshot().projection.events, ts: Date.now() })
+  if (u.pathname === '/api/gateway/status' && req.method === 'GET') return sendJson(res, 200, quorumGateway.status())
   if (u.pathname === '/api/openclaw/connect' && req.method === 'POST') {
     if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
     openclawBridge.connect()
@@ -184,6 +359,11 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/api/openclaw/actions/confirm' && req.method === 'POST') {
     if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
     readJson(req).then(input => openclawBridge.confirmAction(input.previewId)).then(action => sendJson(res, 200, { action })).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/openclaw/actions/cancel' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => sendJson(res, 200, { action: openclawBridge.cancelAction(input.previewId) })).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
     return
   }
   if (u.pathname === '/api/catalog') {
@@ -210,7 +390,8 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/api/platform' && req.method === 'GET') return sendJson(res, 200, { schemaVersion: 1, capabilities: platformCapabilities(), services: platformServices, ts: Date.now() })
   if (u.pathname === '/api/processes' && req.method === 'GET') return sendJson(res, 200, { schemaVersion: 1, processes: state.data.processes?.inventory || [], capabilities: state.data.processes?.capabilities || platformCapabilities(), control: processController.snapshot(), ts: Date.now() })
   if (u.pathname === '/api/city' && req.method === 'GET') return sendJson(res, 200, buildCityState(state.data, standingJobs.snapshot(), platformServices))
-  if (u.pathname === '/api/standing-jobs' && req.method === 'GET') return sendJson(res, 200, standingJobs.snapshot())
+  if (u.pathname === '/api/standing-jobs' && req.method === 'GET') return sendJson(res, 200, { ...standingJobs.snapshot(), cloudBudget: runtimeManager.budgetStatus() })
+  if (u.pathname === '/api/cloud-budget' && req.method === 'GET') return sendJson(res, 200, runtimeManager.budgetStatus())
   const standingJobRoute = u.pathname.match(/^\/api\/standing-jobs\/([^/]+)\/(run|suspend|resume)$/)
   if (standingJobRoute && req.method === 'POST') {
     if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
@@ -245,7 +426,14 @@ const server = http.createServer((req, res) => {
   }
   if (u.pathname === '/api/memory/sync' && req.method === 'POST') {
     if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
-    Promise.all([reindexArtifacts(), refreshMemoryBridge()]).then(async ([artifacts, bridgeBeforeSync]) => {
+    const artifactRefresh = reindexArtifacts()
+      .then(result => { state.update('artifacts', result); return result })
+      .catch(() => buildArtifactState())
+    const boundedArtifactRefresh = Promise.race([
+      artifactRefresh,
+      new Promise(resolve => setTimeout(() => resolve(buildArtifactState()), ARTIFACT_SYNC_RESPONSE_BUDGET_MS)),
+    ])
+    Promise.all([boundedArtifactRefresh, refreshMemoryBridge()]).then(async ([artifacts, bridgeBeforeSync]) => {
       const sync = bridgeBeforeSync.claudeMem.reachable
         ? await memoryBridge.sync()
         : { ok: false, state: bridgeBeforeSync.claudeMem.state, error: 'claude-mem endpoint is not reachable' }
@@ -279,6 +467,8 @@ const server = http.createServer((req, res) => {
     if (!room) return sendJson(res, 404, { error: 'unknown project' })
     try { return sendJson(res, 200, openDirectory(room.cwd, projectOpenRoute[2] === 'reveal' ? 'reveal' : 'default', [{ id: projectId, path: room.cwd }])) } catch (error) { return sendJson(res, 400, { error: String(error.message || error) }) }
   }
+  const hqRoute = u.pathname.match(/^\/api\/hq(?:\/(.*))?$/)
+  if (hqRoute) { void handleHq(req, res, u, hqRoute[1] || ''); return }
   if (u.pathname === '/api/missions' && req.method === 'GET') {
     return sendJson(res, 200, { missions: missions.list().map(publicMission) })
   }
@@ -304,6 +494,7 @@ const server = http.createServer((req, res) => {
       const room = (state.data.projects?.rooms || []).find(item => item.id === (input.roomId || task.roomId))
       if (!room) throw new Error('unknown project room')
       const worktree = path.resolve(String(input.worktree || task.worktree || room.cwd))
+      if (!withinDir(worktree, path.resolve(room.cwd))) throw new Error('worktree must be inside the project room')
       if (!fs.existsSync(worktree) || !fs.statSync(worktree).isDirectory()) throw new Error('worktree directory does not exist')
       const catalog = buildCatalog()
       const preview = previewAction({
@@ -314,34 +505,36 @@ const server = http.createServer((req, res) => {
         modelRef: input.modelRef || task.modelRef || undefined,
         task: input.task || task.description || task.title,
         modelOptions: roundtableModelOptions({ catalog }),
+        // The preview must show the command that will actually run, and every
+        // mission dispatch is now a structured one-shot invocation.
+        managed: true,
       }, catalog, state, ptys)
+      const runtimeId = input.runtimeId || task.runtimeId || 'codex'
+      // Mission dispatch runs one structured, non-interactive invocation and
+      // nothing else. It used to be able to open an interactive PTY and call
+      // the task "completed" on that terminal's exit code, which recorded no
+      // evidence at all. A runtime with no structured adapter is refused by
+      // name rather than quietly downgraded to that path.
+      if (!STRUCTURED_MISSION_RUNTIMES.includes(runtimeId)) throw new Error(`mission dispatch needs a runtime with structured non-interactive output (${STRUCTURED_MISSION_RUNTIMES.join(', ')}); ${runtimeId} only offers an interactive session — launch it from the command centre instead`)
       if (input.confirm !== true) return sendJson(res, 200, { requiresConfirmation: true, mission: publicMission(mission), task, preview })
-      if (input.managed === true) {
-        const pack = resolveAgentPack(input.packId || task.packId || preview.packId || 'builder')
-        const started = await runtimeManager.start({ missionId, taskId, runtime: input.runtimeId || task.runtimeId || 'codex', role: input.role || pack.role, cwd: room.cwd, worktree, branch: input.branch || task.branch || room.branch, task: input.task || task.description || task.title, packId: pack.id, modelRef: input.modelRef || task.modelRef || preview.modelRef })
-        refreshAgentControl(); refreshMissions()
-        return sendJson(res, 202, { ...started, mission: publicMission(missions.get(mission.id)), task: missions.get(mission.id)?.tasks.find(item => item.id === task.id), memory: memoryBridge.status() })
-      }
-      const result = executeAction(preview, { ...input, roomId: preview.roomId, confirm: true }, { state, ptys, startPty: (profile, roomId, launch) => {
-        const pack = preview.packId ? resolveAgentPack(preview.packId) : null
-        const run = pack ? agentControl.createRun({ runtime: profile, role: pack.role, packId: pack.id, modelRef: preview.modelRef, repoRoot: room.cwd, worktree, branch: input.branch || task.branch, plannedActions: pack.capabilities, requiredGates: pack.gates, parentTask: task.id }) : null
-        const rec = ptys.create(profile, worktree, 120, 30, launch?.shellCommand || null, run ? { QUORUM_AGENT_PACK: pack.id, QUORUM_AGENT_RUN_ID: run.runId, QUORUM_MISSION_ID: mission.id, QUORUM_TASK_ID: task.id } : {})
-        if (run) { superviseRun(run, rec); refreshAgentControl() }
-        rec.term.onExit(({ exitCode }) => {
-          try {
-            if (missions.get(mission.id)?.tasks.find(item => item.id === task.id)?.status === 'cancelled') return
-            missions.setTask(mission.id, task.id, { status: exitCode === 0 ? 'completed' : 'failed', ptyId: rec.id, error: exitCode === 0 ? null : `process exit ${exitCode ?? 'unknown'}` })
-            refreshMissions(); state.event({ kind: 'mission', text: `task ${task.id} ${exitCode === 0 ? 'completed' : 'failed'} → ${mission.title}` })
-          } catch { /* the process exit must never crash the cockpit */ }
-        })
-        missions.setTask(mission.id, task.id, { status: 'working', ptyId: rec.id, worktree, branch: input.branch || task.branch, startedAt: new Date().toISOString() })
-        missions.event(mission.id, 'TASK_STARTED', `${task.title} → ${profile}`)
-        refreshMissions()
-        return rec
-      } })
-      return sendJson(res, 200, { ...result, mission: publicMission(missions.get(mission.id)), task: missions.get(mission.id)?.tasks.find(item => item.id === task.id) })
+      const pack = resolveAgentPack(input.packId || task.packId || preview.packId || 'builder')
+      const started = await runtimeManager.start({ missionId, taskId, runtime: runtimeId, role: input.role || pack.role, cwd: room.cwd, worktree, branch: input.branch || task.branch || room.branch, task: input.task || task.description || task.title, packId: pack.id, modelRef: input.modelRef || task.modelRef || preview.modelRef })
+      refreshAgentControl(); refreshMissions()
+      return sendJson(res, 202, { ...started, mission: publicMission(missions.get(mission.id)), task: missions.get(mission.id)?.tasks.find(item => item.id === task.id), memory: memoryBridge.status() })
     }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
     return
+  }
+  const missionTaskEvidence = u.pathname.match(/^\/api\/missions\/([^/]+)\/tasks\/([^/]+)\/evidence$/)
+  if (missionTaskEvidence && req.method === 'GET') {
+    const [missionId, taskId] = missionTaskEvidence.slice(1)
+    let task
+    try { task = missions.task(missionId, taskId).task } catch (error) { return sendJson(res, 404, { error: String(error.message || error) }) }
+    const runs = (agentControl.store.list('runs') || []).filter(run => run.missionId === missionId && run.parentTask === taskId)
+    const planIds = new Set(runs.map(run => run.closeout?.execution?.planId).filter(Boolean))
+    const plans = agentControl.store.list('executionPlans').filter(plan => planIds.has(plan.id) || runs.some(run => run.runId === plan.runId))
+    const evidence = agentControl.store.list('evidence').filter(record => plans.some(plan => plan.id === record.planId))
+    const verifications = agentControl.store.list('verifications').filter(record => plans.some(plan => plan.id === record.planId))
+    return sendJson(res, 200, { missionId, taskId, status: task.status, verification: task.verification || [], error: task.error || null, plans, evidence, verifications })
   }
   const missionRoute = u.pathname.match(/^\/api\/missions\/([^/]+)$/)
   if (missionRoute && req.method === 'GET') {
@@ -369,7 +562,7 @@ const server = http.createServer((req, res) => {
     } catch (error) { return sendJson(res, 400, { error: String(error.message || error) }) }
   }
   if (u.pathname === '/api/runtime-runs' && req.method === 'GET') {
-    return sendJson(res, 200, { runs: runtimeManager.snapshot(), memory: memoryBridge.status(), ts: Date.now() })
+    return sendJson(res, 200, { runs: runtimeManager.snapshot(), cloudBudget: runtimeManager.budgetStatus(), memory: memoryBridge.status(), ts: Date.now() })
   }
   const runtimeEvents = u.pathname.match(/^\/api\/runtime-runs\/([^/]+)\/events$/)
   if (runtimeEvents && req.method === 'GET') return sendJson(res, 200, { runId: runtimeEvents[1], events: runtimeManager.events(runtimeEvents[1]) })
@@ -436,8 +629,10 @@ const server = http.createServer((req, res) => {
   if (recover && req.method === 'POST') {
     if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
     try {
-      const replacements = agentControl.recover({ now: Date.now() })
+      const { recovered: replacements, abandoned } = agentControl.recover({ now: Date.now() })
       const replacement = replacements.find(run => run.parentTask === recover[1])
+      const retired = abandoned.find(run => run.runId === recover[1])
+      if (retired) { refreshAgentControl(); return sendJson(res, 409, { error: `run cannot be recovered: ${retired.disposition}`, run: retired }) }
       if (!replacement) return sendJson(res, 409, { error: 'run is not yet eligible for recovery', runs: replacements })
       refreshAgentControl(); return sendJson(res, 201, { run: replacement })
     } catch (error) { return sendJson(res, 400, { error: String(error.message || error) }) }
@@ -606,15 +801,54 @@ const server = http.createServer((req, res) => {
     return
   }
   // A debate is only worth what survives it, so every table is exportable as a
-  // decision record you can drop into a repo or a vault next to the code.
+  // decision record you can drop into a repo or a vault next to the code. The
+  // HTML variant is a self-contained review/demo artefact; both formats use the
+  // same prompt-free, credential-free debate projection.
+  if (u.pathname === '/api/roundtable/save' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(input => {
+      const { debateId, targetPath } = input
+      if (!debateId || !targetPath) throw new Error('debateId and targetPath are required')
+      const all = roundtables.list()
+      const debate = [...all.live, ...all.recent].find(d => d.id === debateId)
+      if (!debate) throw new Error('no such roundtable')
+
+      const room = (state.data.projects?.rooms || []).find(r => r.id === debate.roomId)
+      if (!room) throw new Error('debate room no longer exists')
+
+      const absolutePath = path.resolve(targetPath)
+      if (!withinDir(absolutePath, path.resolve(room.cwd))) {
+        throw new Error('target path must be inside the project room')
+      }
+
+      const content = debateToMarkdown(debate)
+      fs.writeFileSync(absolutePath, content)
+      return sendJson(res, 200, { success: true, path: absolutePath })
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
+  }
+  if (u.pathname === '/api/adr') {
+    const room = (state.data.projects?.rooms || []).find(r => r.id === u.searchParams.get('roomId'))
+    if (!room) return sendJson(res, 404, { error: 'unknown project room' })
+    const adrDir = path.join(room.cwd, 'docs', 'adr')
+    if (!fs.existsSync(adrDir)) return sendJson(res, 200, { adrs: [] })
+    const files = fs.readdirSync(adrDir).filter(f => f.endsWith('.md'))
+    const adrs = files.map(f => {
+      const content = fs.readFileSync(path.join(adrDir, f), 'utf8')
+      const titleMatch = content.match(/^#\s+(.+)$/m)
+      return { id: f, title: titleMatch ? titleMatch[1] : f, path: path.join('docs/adr', f) }
+    })
+    return sendJson(res, 200, { adrs })
+  }
   if (u.pathname.startsWith('/api/roundtable/')) {
-    const id = u.pathname.slice('/api/roundtable/'.length).replace(/\.md$/, '')
+    const html = u.pathname.endsWith('.html')
+    const id = u.pathname.slice('/api/roundtable/'.length).replace(/\.(?:md|html)$/, '')
     const all = roundtables.list()
     const debate = [...all.live, ...all.recent].find(d => d.id === id)
     if (!debate) { res.statusCode = 404; return res.end('no such roundtable') }
-    res.setHeader('content-type', 'text/markdown; charset=utf-8')
-    res.setHeader('content-disposition', `attachment; filename="${id}.md"`)
-    return res.end(debateToMarkdown(debate))
+    res.setHeader('content-type', html ? 'text/html; charset=utf-8' : 'text/markdown; charset=utf-8')
+    res.setHeader('content-disposition', `attachment; filename="${id}.${html ? 'html' : 'md'}"`)
+    return res.end(html ? debateToHtml(debate) : debateToMarkdown(debate))
   }
   let file = null
   if (VENDOR[u.pathname]) {
@@ -637,9 +871,24 @@ const server = http.createServer((req, res) => {
 // otherwise connect and drive `pty.create`/`pty.input` — arbitrary local code
 // execution. Reject every handshake whose Origin is not our own page.
 const wss = new WebSocketServer({
-  server,
-  path: '/ws',
-  verifyClient: ({ origin }) => isAllowedOrigin(origin, PORT),
+  noServer: true,
+})
+const gatewayWss = new WebSocketServer({ noServer: true })
+gatewayWss.on('connection', (ws, req) => quorumGateway.attach(ws, req))
+
+// Route both sockets explicitly so the legacy PTY contract and the
+// OpenClaw-compatible protocol can coexist without one WebSocketServer
+// pre-empting the other. Both are still loopback-bound and Origin-gated.
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, 'http://localhost')
+  if (rejectForeignOrigin(req)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+    socket.destroy()
+    return
+  }
+  if (url.pathname === '/ws') return wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req))
+  if (url.pathname === '/gateway') return gatewayWss.handleUpgrade(req, socket, head, ws => gatewayWss.emit('connection', ws, req))
+  socket.destroy()
 })
 
 let startupErrorHandled = false
@@ -656,10 +905,12 @@ function failStartup(error) {
 }
 server.once('error', failStartup)
 wss.once('error', failStartup)
+gatewayWss.once('error', failStartup)
+server.once('close', () => { quorumGateway.close(); gatewayWss.close() })
 
 wss.on('connection', ws => {
   state.clients.add(ws)
-  ws.send(JSON.stringify(state.snapshot()))
+  ws.send(state.snapshotMessage())
   ws.send(JSON.stringify({ type: 'pty.list', ptys: ptys.list() }))
   // The cast is static for the life of the process, so it rides the handshake
   // rather than the 2s collector tick.
@@ -697,8 +948,18 @@ wss.on('connection', ws => {
 
 function handle(ws, m, watcher) {
   switch (m.type) {
+    // A client that saw a version gap in the patch stream asks for the whole
+    // value back. `State.resync` writes it into THIS cockpit's event feed, so
+    // one that is quietly resyncing is visible instead of looking healthy —
+    // and validates the key and rate-limits the socket, because the key comes
+    // straight off the wire and the feed is a fixed-size shared ring.
+    case 'state.resync': {
+      const key = String(m.key || '')
+      if (key) state.resync(key, ws)
+      break
+    }
     case 'pty.create': {
-      const rec = ptys.create(m.profile, m.cwd, m.cols, m.rows)
+      const rec = ptys.create(m.profile, m.cwd, m.cols, m.rows, null, {}, ws)
       const projectId = m.projectId || resolveProjectId(m.cwd)
       try {
         stampPresence({ projectId, agent: m.profile, ptyId: rec.id, cwd: rec.cwd })
@@ -717,9 +978,9 @@ function handle(ws, m, watcher) {
       break
     }
     case 'pty.attach': ptys.attach(m.id, ws); break
-    case 'pty.input': ptys.input(m.id, m.data); break
-    case 'pty.resize': ptys.resize(m.id, m.cols, m.rows); break
-    case 'pty.kill': ptys.kill(m.id); break
+    case 'pty.input': ptys.input(m.id, m.data, ws); break
+    case 'pty.resize': ptys.resize(m.id, m.cols, m.rows, ws); break
+    case 'pty.kill': ptys.kill(m.id, ws); break
     case 'watch': watcher.watch(m.file, m.agent); break
     case 'unwatch': watcher.stop(); break
     case 'proc.kill': killProc(m.pid); break
@@ -739,7 +1000,7 @@ function handle(ws, m, watcher) {
         if (!room) throw new Error('unknown project room')
         const pack = preview.packId ? resolveAgentPack(preview.packId) : null
         const run = pack ? agentControl.createRun({ runtime: profile, role: pack.role, packId: pack.id, modelRef: preview.modelRef, repoRoot: room.cwd, worktree: room.cwd, plannedActions: pack.capabilities, requiredGates: pack.gates }) : null
-        const rec = ptys.create(profile, room.cwd, m.cols || 120, m.rows || 30, launch?.shellCommand || null, run ? { QUORUM_AGENT_PACK: pack.id, QUORUM_AGENT_RUN_ID: run.runId } : {})
+        const rec = ptys.create(profile, room.cwd, m.cols || 120, m.rows || 30, launch?.shellCommand || null, run ? { QUORUM_AGENT_PACK: pack.id, QUORUM_AGENT_RUN_ID: run.runId } : {}, ws)
         if (run) {
           superviseRun(run, rec); refreshAgentControl()
         }
@@ -768,6 +1029,109 @@ function handle(ws, m, watcher) {
       const action = agentControl.approveAction(String(m.actionId || '')); refreshAgentControl(); ws.send(JSON.stringify({ type: 'agent-control.action', action })); break
     }
   }
+}
+
+// ── Quorum HQ routes ──────────────────────────────────────────────────────
+// Writes are Origin-gated like every other mutating route. A request carrying
+// `x-quorum-run` (the CLI sends it from inside a managed run) acts as that
+// run's agent, with an agent's narrower rights — or is refused if the run is
+// not live. It is never treated as the board.
+async function handleHq(req, res, u, rest) {
+  const write = !['GET', 'HEAD'].includes(req.method)
+  if (write && rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+  // A search reads the whole history. Any page on another site could make
+  // the browser ask for one again and again, so it answers only this
+  // cockpit's own pages and clients outside a browser (the CLI sends no
+  // Sec-Fetch-Site; a browser always does).
+  if (rest.split('/')[0] === 'search' && (rejectForeignOrigin(req) || !['same-origin', 'none', undefined].includes(req.headers['sec-fetch-site']))) return sendJson(res, 403, { error: 'search answers only this cockpit' })
+  try {
+    // Reads are the same for everyone, so only a write resolves who is asking.
+    const actor = hq.actorForRun(write ? req.headers['x-quorum-run'] : '')
+    const body = write ? await readJson(req) : {}
+    const parts = rest.split('/').filter(Boolean).map(part => decodeURIComponent(part))
+    const result = await routeHq(req.method, parts, body && typeof body === 'object' ? body : {}, actor, u.searchParams)
+    if (!result) return sendJson(res, 404, { error: `no HQ route for ${req.method} /api/hq/${rest}` })
+    return sendJson(res, result.status, result.body)
+  } catch (error) {
+    return sendJson(res, error instanceof HqError ? error.status : 400, { error: String(error.message || error) })
+  }
+}
+
+async function routeHq(method, [area, id, action], body, actor, query) {
+  const ok = (value, status = 200) => ({ status, body: value })
+  if (!area) return method === 'GET' ? ok(hq.snapshot()) : null
+  if (area === 'init' && method === 'POST') return ok(hq.init(body, actor), 201)
+  if (area === 'verify' && method === 'GET') return ok(hq.verify())
+  if (!hq.ready()) throw new HqError('HQ is not set up yet — run `quorum hq init` or open the HQ view', 409)
+  if (area === 'company' && method === 'PATCH') return ok({ company: hq.updateCompany(body, actor) })
+  if (area === 'org' && method === 'GET') return ok(hq.org())
+  if (area === 'budget' && method === 'GET') return ok(hq.budgets())
+  if (area === 'activity' && method === 'GET') return ok({ activity: hq.activity(query.get('limit') || 40) })
+  if (area === 'convene' && method === 'POST') return ok(hq.convene(body, actor), body.confirm === true ? 202 : 200)
+  if (area === 'agents') {
+    if (!id && method === 'GET') return ok({ agents: hq.snapshot().agents })
+    if (!id && method === 'POST') { const result = hq.hire(body, actor); return ok(result, result.approval ? 202 : 201) }
+    if (id && !action && method === 'GET') {
+      const agent = hq.snapshot().agents.find(item => item.id === id.toLowerCase())
+      if (!agent) throw new HqError(`unknown agent: ${id}`, 404)
+      return ok({ agent, tickets: hq.snapshot().tickets.filter(ticket => ticket.assigneeId === agent.id) })
+    }
+    if (id && !action && method === 'PATCH') return ok(hq.updateAgent(id, body, actor))
+    if (id && method === 'POST' && action === 'pause') return ok(hq.pause(id, actor))
+    if (id && method === 'POST' && action === 'resume') return ok(hq.resume(id, actor))
+    if (id && method === 'POST' && action === 'terminate') return ok(hq.terminate(id, actor))
+    if (id && method === 'POST' && action === 'wake') return ok(await hq.wake(id, body, actor))
+    return null
+  }
+  if (area === 'goals') {
+    if (!id && method === 'GET') return ok({ goals: hq.snapshot().goals })
+    if (!id && method === 'POST') return ok(hq.addGoal(body, actor), 201)
+    if (id && !action && method === 'PATCH') return ok(hq.updateGoal(id, body, actor))
+    return null
+  }
+  if (area === 'routines') {
+    if (!id && method === 'GET') return ok({ routines: hq.snapshot().routines })
+    if (!id && method === 'POST') return ok(hq.addRoutine(body, actor), 201)
+    if (id && !action && method === 'PATCH') return ok(hq.updateRoutine(id, body, actor))
+    if (id && method === 'POST' && ['pause', 'resume', 'retire'].includes(action)) return ok(hq.setRoutineStatus(id, action, actor))
+    if (id && method === 'POST' && action === 'run') return ok(hq.runRoutine(id, actor))
+    return null
+  }
+  if (area === 'search' && method === 'GET') return ok(await hq.search(query.get('q') || '', { limit: query.get('limit') || 50 }))
+  if (area === 'tickets') {
+    if (!id && method === 'GET') {
+      const status = query.get('status')
+      const assignee = query.get('assignee')
+      return ok({ tickets: hq.snapshot().tickets.filter(ticket => (!status || ticket.status === status) && (!assignee || ticket.assigneeId === assignee.toLowerCase())) })
+    }
+    if (!id && method === 'POST') return ok(hq.createTicket(body, actor), 201)
+    if (id && !action && method === 'GET') return ok(hq.ticketDetail(id))
+    if (id && !action && method === 'PATCH') return ok(hq.updateTicket(id, body, actor))
+    if (id && method === 'POST' && action === 'assign') return ok(hq.assign(id, body.agentId, actor))
+    if (id && method === 'POST' && action === 'close') return ok(hq.close(id, actor))
+    if (id && method === 'POST' && action === 'reopen') return ok(hq.reopen(id, actor))
+    if (id && method === 'POST' && action === 'dispatch') return ok(await hq.dispatch(id, body, actor), body.confirm === true ? 202 : 200)
+    if (id && method === 'POST' && action === 'cancel') return ok(hq.cancelRun(id, actor))
+    if (id && method === 'POST' && action === 'comment') {
+      const { ticket } = hq.ticketDetail(id)
+      return ok(hq.post({ channelId: ticket.channelId, threadId: ticket.id, text: body.text }, actor), 201)
+    }
+    return null
+  }
+  if (area === 'channels') {
+    if (!id && method === 'GET') return ok({ channels: hq.snapshot().channels })
+    if (!id && method === 'POST') return ok(hq.createChannel(body, actor), 201)
+    if (id && action === 'messages' && method === 'GET') return ok(hq.messages(id, { limit: query.get('limit') || 100, threadId: query.has('thread') ? query.get('thread') || null : undefined, before: query.get('before') }))
+    if (id && action === 'messages' && method === 'POST') return ok(hq.post({ channelId: id, threadId: body.threadId || null, text: body.text }, actor), 201)
+    return null
+  }
+  if (area === 'approvals') {
+    if (!id && method === 'GET') return ok({ approvals: hq.snapshot().approvals })
+    if (id && method === 'POST' && action === 'approve') return ok(await hq.approve(id, actor))
+    if (id && method === 'POST' && action === 'deny') return ok(hq.deny(id, body.reason, actor))
+    return null
+  }
+  return null
 }
 
 // A debate spends real money on every turn, so the room is resolved from the
@@ -829,7 +1193,7 @@ function openChat(ws, m) {
   const open = chatPtys.get(sessionId)
   if (open && ptys.list().some(p => p.id === open && !p.exited)) return open
 
-  const rec = ptys.create('claude', agent.cwd, m.cols, m.rows, `claude --resume ${sessionId}`)
+  const rec = ptys.create('claude', agent.cwd, m.cols, m.rows, `claude --resume ${sessionId}`, {}, ws)
   chatPtys.set(sessionId, rec.id)
   try {
     stampPresence({ projectId: agent.projectId, agent: 'claude', ptyId: rec.id, cwd: rec.cwd })
@@ -867,5 +1231,8 @@ const edition = await loadEdition()
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Quorum (${edition.tier}) → http://127.0.0.1:${PORT}`)
   if (edition.tier !== 'pro') console.log(`  free edition — ${edition.reason}`)
-  else if (edition.customCount) console.log(`  ${edition.customCount} custom character(s) loaded`)
+  else {
+    if (edition.updatesExpired) console.log(`  ${edition.updatesNote}`)
+    if (edition.customCount) console.log(`  ${edition.customCount} custom character(s) loaded`)
+  }
 })

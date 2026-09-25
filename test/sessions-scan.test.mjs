@@ -6,20 +6,20 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { scratchDir } from './helpers/scratch.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 const CLAUDE_SESSION = '0123abcd-0000-4000-8000-000000000001'
 const BG_SESSION = '9999beef-0000-4000-8000-000000000002'
 
-function fixtureHome() {
+function fixtureHome(t) {
   // Force HOME through a symlink so watcher path validation exercises the same
   // canonical-vs-logical path boundary found on macOS (/var -> /private/var).
-  const realHome = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-sess-'))
-  const aliasRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-sess-alias-'))
+  const realHome = scratchDir(t, 'quorum-sess-')
+  const aliasRoot = scratchDir(t, 'quorum-sess-alias-')
   const home = path.join(aliasRoot, 'home-link')
   fs.symlinkSync(realHome, home, 'dir')
   const proj = path.join(home, '.claude', 'projects', '-Users-someone-work')
@@ -72,8 +72,8 @@ function runInHome(home, body) {
   return JSON.parse(r.stdout)
 }
 
-test('startSessions builds cards from claude + codex transcripts, skips stale files, flags bg jobs', () => {
-  const { home } = fixtureHome()
+test('startSessions builds cards from claude + codex transcripts, skips stale files, flags bg jobs', t => {
+  const { home } = fixtureHome(t)
   const out = runInHome(home, `
     globalThis.setInterval = () => ({ unref() {} })
     const { startSessions } = await import('./src/collectors/sessions.js')
@@ -109,8 +109,8 @@ test('startSessions builds cards from claude + codex transcripts, skips stale fi
   assert.equal(cx.summary, 'All done here')
 })
 
-test('TranscriptWatcher parses claude and codex events and streams appended lines', () => {
-  const { home, claudeFile } = fixtureHome()
+test('TranscriptWatcher parses claude and codex events and streams appended lines', t => {
+  const { home, claudeFile } = fixtureHome(t)
   const codexFile = path.join(home, '.codex', 'sessions', '2026', '08', '22',
     'rollout-2026-08-22T10-00-00-deadbeef-1111-2222-3333-444444444444.jsonl')
   const out = runInHome(home, `

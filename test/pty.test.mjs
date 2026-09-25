@@ -5,8 +5,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
-import path from 'node:path'
 import { PtyManager } from '../src/pty.js'
+import { defer, scratchDir } from './helpers/scratch.mjs'
 
 function fakeState() {
   const s = { events: [], broadcasts: [] }
@@ -27,8 +27,8 @@ const waitFor = (pred, ms = 8000) => new Promise((resolve, reject) => {
   tick()
 })
 
-test('PtyManager spawns a shell, streams output to attached sockets, strips CLAUDE* env, and kills cleanly', async () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'quorum-pty-'))
+test('PtyManager spawns a shell, streams output to attached sockets, strips CLAUDE* env, and kills cleanly', async t => {
+  const cwd = scratchDir(t, 'quorum-pty-')
   const state = fakeState()
   const mgr = new PtyManager(state)
   const ws = fakeWs()
@@ -36,6 +36,8 @@ test('PtyManager spawns a shell, streams output to attached sockets, strips CLAU
   process.env.CLAUDE_TEST_LEAK = 'should-not-appear'
   const rec = mgr.create('shell', cwd, 80, 24)
   delete process.env.CLAUDE_TEST_LEAK
+  // However the test ends, the shell has exited before its cwd is removed.
+  defer(t, async () => { mgr.kill(rec.id); await waitFor(() => rec.exited) })
 
   assert.match(rec.id, /^t\d+$/)
   assert.equal(rec.cwd, cwd)
@@ -44,8 +46,13 @@ test('PtyManager spawns a shell, streams output to attached sockets, strips CLAU
   assert.equal(state.broadcasts.at(-1).type, 'pty.list')
 
   mgr.attach(rec.id, ws)
+  assert.equal(rec.owner, ws)
   assert.equal(ws.msgs[0].type, 'pty.attach')
   assert.equal(ws.msgs[0].id, rec.id)
+
+  const foreign = fakeWs()
+  mgr.attach(rec.id, foreign)
+  assert.equal(foreign.msgs.length, 0, 'a second socket cannot attach to another socket\'s pty')
 
   mgr.input(rec.id, 'printf "MARK:%s:%s\\n" "$PWD" "${CLAUDE_TEST_LEAK:-unset}"\r')
   await waitFor(() => rec.buf.includes('MARK:'))
@@ -62,6 +69,7 @@ test('PtyManager spawns a shell, streams output to attached sockets, strips CLAU
   mgr.attach('nope', ws)
 
   mgr.detachAll(ws)
+  assert.equal(rec.owner, null, 'disconnect releases the socket ownership claim')
   const before = ws.msgs.length
   mgr.input(rec.id, 'echo after-detach\r')
   await waitFor(() => rec.buf.includes('after-detach'))
