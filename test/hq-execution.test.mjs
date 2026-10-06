@@ -28,6 +28,7 @@ async function studio(t, options) {
 
 test('supervised: a mention asks first; approval starts one structured run with the brief and the agent env', async t => {
   const { hq, runtime, workspace, missions } = await studio(t)
+  hq.updateAgent('codey', { projectInstructions: { app: 'Keep the app routes backward-compatible.' } })
   const { tickets } = hq.post({ channelId: 'general', text: '@codey fix the flaky auth test' })
   await hq.idle()
   const ticketId = tickets[0].id
@@ -47,6 +48,8 @@ test('supervised: a mention asks first; approval starts one structured run with 
   assert.equal(call.env.QUORUM_HQ_TICKET, ticketId)
   assert.match(call.task, /Ticket T-\d+ \(normal priority\): fix the flaky auth test/)
   assert.match(call.task, /Company mission: Ship the cockpit/)
+  assert.match(call.task, /Project: App/)
+  assert.match(call.task, /Keep the app routes backward-compatible/)
   assert.equal(missions.get(call.missionId).tasks[0].status, 'working')
 
   const ticket = hq.data.tickets[ticketId]
@@ -765,6 +768,10 @@ test('an ask binds the job pack and the agent\'s brief too', async t => {
   const next = pendingFor(hq, ticket.id)
   hq.updateAgent('pixel', { instructions: 'Also push to main when done.' })
   await rejects(hq.approve(next.id), /agent brief/, 409)
+  await hq.idle()
+  const projectAsk = pendingFor(hq, ticket.id)
+  hq.updateAgent('pixel', { projectInstructions: { app: 'Never push from this project.' } })
+  await rejects(hq.approve(projectAsk.id), /project-specific brief/, 409)
 })
 
 test('a start interrupted by a crash adopts the worker\'s run, never a later one', async t => {

@@ -92,6 +92,10 @@ test('the scan interval backs off while idle and snaps back on the first change'
 // The persisted index is only worth its bytes if a restart reads it back, so
 // this runs the real module in a child process against a scratch HOME.
 function runInScratchHome(home, script) {
+  const vault = path.join(home, 'Documents', 'Obsidian Vault')
+  fs.mkdirSync(vault, { recursive: true })
+  fs.mkdirSync(path.join(home, '.quorum'), { recursive: true })
+  fs.writeFileSync(path.join(home, '.quorum', 'artifact-scope.json'), JSON.stringify({ version: 1, roots: [{ id: 'vault', label: 'Obsidian vault', path: vault, maxDepth: 8 }] }))
   return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], {
     env: { ...process.env, HOME: home, QUORUM_ARTIFACT_ROOTS: '' },
     cwd: ROOT,
@@ -195,8 +199,31 @@ test('an unset QUORUM_ARTIFACT_ROOTS does not index the process working director
     if (value === undefined) delete env.QUORUM_ARTIFACT_ROOTS
     else env.QUORUM_ARTIFACT_ROOTS = value
     const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], { env, cwd: ROOT, encoding: 'utf8' }).trim())
-    assert.deepEqual(out.ids, ['vault'], `QUORUM_ARTIFACT_ROOTS=${JSON.stringify(value)} added a root`)
+    assert.deepEqual(out.ids, [], `without explicit approval, QUORUM_ARTIFACT_ROOTS=${JSON.stringify(value)} must not index defaults`)
   }
+})
+
+test('artifact indexing starts empty and only uses explicitly approved roots', t => {
+  const home = scratchDir(t, 'quorum-index-consent-')
+  const vault = path.join(home, 'vault')
+  fs.mkdirSync(vault)
+  fs.writeFileSync(path.join(vault, 'private.md'), 'approved text')
+  const mod = JSON.stringify(path.join(ROOT, 'src', 'artifacts.js'))
+  const script = `
+    const m = await import(${mod})
+    const before = m.artifactRoots()
+    const saved = m.saveArtifactScope([${JSON.stringify(vault)}])
+    const after = await m.reindexArtifacts()
+    console.log(JSON.stringify({ before, after: m.artifactRoots(), total: after.stats.total, mode: (await import('node:fs')).statSync(saved.path).mode & 0o777 }))
+  `
+  const result = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, HOME: home, QUORUM_ARTIFACT_ROOTS: '' }, cwd: ROOT, encoding: 'utf8',
+  }).trim().split('\n').at(-1))
+  assert.deepEqual(result.before, [])
+  assert.equal(result.after.length, 1)
+  assert.equal(result.after[0].path, fs.realpathSync(vault))
+  assert.equal(result.total, 1)
+  assert.equal(result.mode, 0o600)
 })
 
 // readLog() reads in 1 MiB chunks. It used to carry only the partial LINE

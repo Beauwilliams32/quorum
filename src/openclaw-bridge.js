@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import { WebSocket as NodeWebSocket } from 'ws'
 
 const PROTOCOL_VERSION = 4
-const MAX_FRAME_BYTES = 64 * 1024
+const MAX_FRAME_BYTES = 256 * 1024
 const MAX_TEXT = 300
 const MAX_LIST = 100
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/

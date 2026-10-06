@@ -41,6 +41,13 @@ test('installer writes a client-specific LaunchAgent without loading it', t => {
   assert.match(plist, /<key>RunAtLoad<\/key><true\/>/);
 });
 
+test('shipped Quorum LaunchAgent does not require OpenClaw to start', () => {
+  const plist = readFileSync(join(root, 'launchd', 'com.tridentsocial.quorum.plist'), 'utf8');
+  assert.doesNotMatch(plist, /quorum-openclaw-env-wrapper|openclaw gateway auth-token/);
+  assert.match(plist, /<string>\/opt\/homebrew\/opt\/node\/bin\/node<\/string>/);
+  assert.match(plist, /<string>\/Users\/beauwilliams\/CLAUDE\/quorum\/server\.js<\/string>/);
+});
+
 test('installer refuses to overwrite an existing agent unless explicitly replaced', t => {
   const source = fixture(t);
   const home = scratchDir(t, 'quorum-installer-home-');

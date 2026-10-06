@@ -16,12 +16,14 @@ export function verifyText(value) {
   return [value.command, ...(Array.isArray(value.args) ? value.args : [])].filter(Boolean).join(' ')
 }
 
-export function buildWorkPrompt({ company, agent, manager = null, reports = [], goal = null, ticket, thread = [], blockers = [], cli = 'quorum' }) {
+export function buildWorkPrompt({ company, agent, manager = null, reports = [], project = null, projectInstructions = '', goal = null, ticket, thread = [], blockers = [], cli = 'quorum' }) {
   const head = [
     `You are ${agent.name}, ${agent.title} at ${company?.name || 'this company'}.`,
     agent.instructions ? clipBlock(agent.instructions, 1200) : '',
     company?.mission ? `Company mission: ${clip(company.mission, 500)}` : '',
     manager ? `You report to ${manager.name} (${manager.title}).` : 'You report to the board — the human operator of this Quorum.',
+    project ? `Project: ${clip(project.label || project.id, 120)}.` : '',
+    projectInstructions ? `Project-specific brief for this project:\n${clipBlock(projectInstructions, 1200)}` : '',
     goal ? `This ticket serves goal ${goal.id}: ${clip(goal.title, 160)}${goal.description ? ` — ${clip(goal.description, 400)}` : ''}` : '',
   ].filter(Boolean)
 

@@ -55,14 +55,16 @@ function machineSafety(home = os.homedir()) {
   if (hermes.present) {
     let source = ''
     try { source = fs.readFileSync(hermesFile, 'utf8') } catch { hermes.safe = false; hermes.reason = 'unreadable-config' }
-    for (const key of ['verify_on_stop', 'hard_stop_enabled', 'guard_agent_created', 'write_approval']) {
-      const match = source.match(new RegExp(`^\\s*${key}:\\s*(true|false)\\s*$`, 'mi'))
-      hermes.checks[key] = match ? match[1] === 'true' : 'not-configured'
-      if (match && match[1] !== 'true') hermes.safe = false
+    for (const [section, key] of [['agent', 'verify_on_stop'], ['tool_loop_guardrails', 'hard_stop_enabled'], ['skills', 'guard_agent_created'], ['skills', 'write_approval']]) {
+      const match = source.match(new RegExp(`^${section}:\\s*$([\\s\\S]*?)(?=^[^\\s#][^\\n]*:|$(?![\\s\\S]))`, 'm'))
+      const value = match?.[1].match(new RegExp(`^\\s+${key}:\\s*(true|false)\\s*$`, 'm'))?.[1]
+      hermes.checks[key] = value ? value === 'true' : 'not-configured'
+      if (value === 'false') hermes.safe = false
     }
-    const autoApprove = source.match(/^\s*subagent_auto_approve:\s*(true|false)\s*$/mi)
-    hermes.checks.subagent_auto_approve = autoApprove ? autoApprove[1] === 'false' : 'not-configured'
-    if (autoApprove && autoApprove[1] !== 'false') hermes.safe = false
+    const delegation = source.match(/^delegation:\s*$([\s\S]*?)(?=^[^\s#][^\n]*:|$(?![\s\S]))/m)?.[1]
+    const autoApprove = delegation?.match(/^\s+subagent_auto_approve:\s*(true|false)\s*$/m)?.[1]
+    hermes.checks.subagent_auto_approve = autoApprove ? autoApprove === 'false' : 'not-configured'
+    if (autoApprove === 'true') hermes.safe = false
   }
   return { claude, hermes }
 }

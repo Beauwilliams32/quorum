@@ -14,7 +14,7 @@ import { startTasks } from './src/collectors/tasks.js'
 import { startComposio } from './src/collectors/composio.js'
 import { startAgents } from './src/collectors/agents.js'
 import { startMemory } from './src/collectors/memory.js'
-import { startArtifacts, reindexArtifacts, buildArtifactState, searchArtifacts, readArtifact, openArtifact, openDirectory } from './src/artifacts.js'
+import { startArtifacts, reindexArtifacts, buildArtifactState, artifactScopeSuggestions, saveArtifactScope, searchArtifacts, readArtifact, openArtifact, openDirectory } from './src/artifacts.js'
 import { checkRepositories } from './src/collectors/repositories.js'
 import { MissionStore, publicMission } from './src/missions.js'
 import { stampPresence } from './src/presence.js'
@@ -411,6 +411,20 @@ const server = http.createServer((req, res) => {
   }
   if (u.pathname === '/api/artifacts/search' && req.method === 'GET') {
     return sendJson(res, 200, searchArtifacts(u.searchParams.get('q') || '', { source: u.searchParams.get('source') || '', limit: u.searchParams.get('limit') || 40 }))
+  }
+  if (u.pathname === '/api/artifacts/scope' && req.method === 'GET') {
+    return sendJson(res, 200, { roots: artifactScopeSuggestions(), approved: buildArtifactState().roots.length > 0 })
+  }
+  if (u.pathname === '/api/artifacts/scope' && req.method === 'POST') {
+    if (rejectForeignOrigin(req)) return sendJson(res, 403, { error: 'origin not allowed' })
+    readJson(req).then(async input => {
+      const scope = saveArtifactScope(input.roots)
+      const artifacts = await reindexArtifacts()
+      state.update('artifacts', artifacts)
+      state.event({ kind: 'memory', text: `index scope updated · ${scope.roots.length} approved root(s)` })
+      return sendJson(res, 200, { ...scope, artifacts })
+    }).catch(error => sendJson(res, 400, { error: String(error.message || error) }))
+    return
   }
   if (u.pathname === '/api/memory' && req.method === 'GET') {
     return sendJson(res, 200, searchArtifacts(u.searchParams.get('q') || '', { source: u.searchParams.get('source') || '', limit: u.searchParams.get('limit') || 40 }))

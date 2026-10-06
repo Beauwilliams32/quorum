@@ -34,6 +34,33 @@ test('roundtable model options keep provider and model explicit', () => {
   assert.ok(options.every(option => !('token' in option) && !('key' in option)))
 })
 
+test('configured Ollama models are labelled local rather than custom cloud', () => {
+  const local = buildCatalog({
+    config: { path: '/tmp/config.json', exists: true, projects: [], runtimes: [], models: [] },
+    runtimes: [{ id: 'ollama', label: 'Ollama', command: 'ollama', kind: 'local', roundtable: true }],
+    models: ['ollama:qwen2.5:3b'],
+  })
+  const model = local.models.find(item => item.id === 'ollama:qwen2.5:3b')
+  assert.equal(model.kind, 'local')
+  assert.equal(model.harnessId, 'ollama')
+})
+
+test('task previews resolve configured local and OAuth models before confirmation', () => {
+  const cfg = { ollamaHost: 'http://127.0.0.1:11436', modelMappings: { ollama: 'qwen2.5:3b', codex: 'gpt-6-sol' } }
+  const models = ['ollama:qwen2.5:3b']
+  const c = buildCatalog({ config: { ...cfg, path: '/tmp/config.json', exists: true, projects: [], runtimes: [], models }, runtimes: [
+    { id: 'ollama', label: 'Ollama', command: 'ollama', kind: 'local', roundtable: true },
+    { id: 'codex', label: 'Codex', command: 'codex', kind: 'cloud' },
+  ], models })
+  const local = previewAction({ action: 'launch', runtimeId: 'ollama', roomId: 'room', packId: 'review', task: 'check health', managed: true }, c, state, ptys, cfg)
+  assert.equal(local.modelRef, 'ollama:qwen2.5:3b')
+  assert.deepEqual(local.launch.args.slice(0, 2), ['run', 'qwen2.5:3b'])
+  assert.equal('env' in local.launch, false)
+  const cloud = previewAction({ action: 'launch', runtimeId: 'codex', roomId: 'room', packId: 'review', modelRef: 'codex:auto', task: 'check health', managed: true }, c, state, ptys, cfg)
+  assert.equal(cloud.modelRef, 'codex:gpt-6-sol')
+  assert.ok(cloud.launch.args.includes('gpt-6-sol'))
+})
+
 test('command previews reject unknown rooms, runtimes, sessions, and chains', () => {
   assert.throws(() => previewAction({ action: 'launch', runtimeId: 'missing', roomId: 'room' }, catalog, state, ptys), /not launchable/)
   assert.throws(() => previewAction({ action: 'launch', runtimeId: 'claude', roomId: 'missing' }, catalog, state, ptys), /unknown project room/)

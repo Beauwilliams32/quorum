@@ -956,6 +956,23 @@ canvas { width: 100%; display: block; margin-bottom: 4px; }
 .mission-preview .danger { color: var(--red); border-color: var(--red); }
 
 .memory-toolbar { display: flex; gap: 8px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.artifact-scope { border-bottom: 1px solid var(--line); }
+.artifact-scope-details { padding: 12px 0; }
+.artifact-scope-details > summary { display: flex; gap: 12px; align-items: center; color: var(--fg1); font-size: 12px; font-weight: 700; cursor: pointer; list-style-position: inside; }
+.artifact-scope-details > summary span { color: var(--muted); font-size: 11px; font-weight: 400; }
+.artifact-scope-card { display: grid; gap: 12px; margin-top: 10px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.artifact-scope-card > p, .artifact-scope-actions > span { margin: 0; color: var(--fg2); font-size: 12px; line-height: 1.5; }
+.artifact-scope-roots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: 8px; }
+.artifact-scope-roots label { display: flex; min-width: 0; gap: 10px; align-items: start; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg1); cursor: pointer; }
+.artifact-scope-roots label:has(input:checked) { border-color: var(--edge-accent); }
+.artifact-scope-roots input { margin-top: 3px; accent-color: var(--accent); }
+.artifact-scope-roots label span { display: grid; min-width: 0; gap: 4px; }
+.artifact-scope-roots b { color: var(--fg0); font-size: 12px; }
+.artifact-scope-roots small { overflow-wrap: anywhere; color: var(--muted); font: 10px var(--mono); }
+.artifact-scope-custom { display: grid; gap: 6px; color: var(--fg1); font-size: 11px; }
+.artifact-scope-custom input { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg0); color: var(--fg0); font: 12px var(--mono); }
+.artifact-scope-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.artifact-scope-details:not([open]) .artifact-scope-card { display: none; }
 #artifact-search-form { display: flex; gap: 7px; flex: 1; min-width: 0; }
 .search-field { flex: 1; min-width: 80px; }
 .memory-ring { position: relative; min-height: 440px; margin: 18px 0; border: 1px solid var(--line); background: var(--surface); overflow: hidden; }

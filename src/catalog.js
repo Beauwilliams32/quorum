@@ -88,7 +88,11 @@ function composeCatalog({ config = loadConfig(), runtimes = loadRuntimes(), mode
     { id: 'openclaw-local', provider: 'OpenClaw', kind: 'local', available: runtimeEntries.some(r => r.id === 'openclaw' && r.available), harnessId: 'openclaw' },
     { id: 'ollama-local', provider: 'Ollama', kind: 'local', available: runtimeEntries.some(r => r.id === 'ollama' && r.available), harnessId: 'ollama' },
     { id: 'wan-local', provider: 'ComfyUI', kind: 'local', available: runtimeEntries.some(r => r.id === 'comfyui-wan' && r.available), harnessId: 'comfyui-wan' },
-    ...models.filter(model => typeof model === 'string' && !['sonnet', 'opus', 'haiku'].includes(model)).map(model => ({ id: model, provider: 'Custom', kind: 'cloud', available: true, harnessId: 'custom' })),
+    ...models.filter(model => typeof model === 'string' && !['sonnet', 'opus', 'haiku'].includes(model)).map(model => {
+      const runtimeId = model.split(':', 1)[0]
+      const runtime = runtimeEntries.find(item => item.id === runtimeId)
+      return { id: model, provider: runtime?.label || 'Custom', kind: runtime?.kind || 'cloud', available: runtime ? runtime.available : true, harnessId: runtime?.id || 'custom' }
+    }),
   ]
   const projects = config.projects?.length || 0
   return {

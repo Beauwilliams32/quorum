@@ -58,10 +58,10 @@ test('the review prompt asks for a machine-readable verdict and forbids edits', 
 })
 
 test('the review launch is a non-interactive structured invocation in a read-only sandbox', () => {
-  const plan = buildTaskLaunch({ runtime: 'codex', role: 'reviewer', cwd: '/tmp/review', task: 'review it', structured: true })
+  const plan = buildTaskLaunch({ runtime: 'codex', role: 'reviewer', cwd: '/tmp/review', task: 'review it', structured: true, config: { modelMappings: { codex: 'gpt-6-sol' } } })
   assert.equal(plan.args[0], 'exec')
   assert.equal(plan.args.includes('--json'), true)
-  assert.deepEqual(plan.args.slice(-5), ['--cd', '/tmp/review', '--sandbox', 'read-only', '--json'])
+  assert.deepEqual(plan.args.slice(-7), ['--cd', '/tmp/review', '--sandbox', 'read-only', '--model', 'gpt-6-sol', '--json'])
   assert.equal(plan.args.includes('--ask-for-approval'), false, 'codex exec has no interactive approval prompt')
   assert.equal(plan.safety.readOnly, true, 'a reviewer must not be launched with write access')
   assert.equal(plan.shellCommand.includes(';'), false)

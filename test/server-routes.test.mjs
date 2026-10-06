@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
+import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
@@ -11,6 +12,10 @@ import { defer, scratchDir, stopChild } from './helpers/scratch.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const controlStateDir = scratchDir(test, 'quorum-route-state-')
+const testHome = scratchDir(test, 'quorum-route-home-')
+const scopeProject = path.join(testHome, 'projects', 'sample')
+fs.mkdirSync(scopeProject, { recursive: true })
+fs.writeFileSync(path.join(scopeProject, 'notes.md'), '# Route test\n\nscoped-index-marker\n')
 const missionStateFile = path.join(controlStateDir, 'missions.json')
 
 /* The port used to be `4700 + random(90)`, which is a live range on a machine
@@ -33,7 +38,7 @@ let child
 test.before(async () => {
   PORT = await freePort()
   base = `http://127.0.0.1:${PORT}`
-  child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(PORT), AGENT_CONTROL_STATE_DIR: controlStateDir, QUORUM_MISSIONS_PATH: missionStateFile, QUORUM_GATEWAY_TOKEN_ENV: 'QUORUM_TEST_GATEWAY_TOKEN', QUORUM_TEST_GATEWAY_TOKEN: 'test-gateway-secret' }, stdio: ['ignore', 'pipe', 'pipe'] })
+  child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, HOME: testHome, PORT: String(PORT), AGENT_CONTROL_STATE_DIR: controlStateDir, QUORUM_MISSIONS_PATH: missionStateFile, QUORUM_GATEWAY_TOKEN_ENV: 'QUORUM_TEST_GATEWAY_TOKEN', QUORUM_TEST_GATEWAY_TOKEN: 'test-gateway-secret' }, stdio: ['ignore', 'pipe', 'pipe'] })
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('server did not start')), 15000)
     child.stdout.on('data', d => { if (String(d).includes(`:${PORT}`)) { clearTimeout(t); resolve() } })
@@ -217,6 +222,26 @@ test('memory recall and sync routes return bounded integration evidence', async 
 test('artifact open actions reject foreign origins before touching the filesystem', async () => {
   const denied = await fetch(`${base}/api/artifacts/000000000000000000000000/open`, { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, body: '{}' })
   assert.equal(denied.status, 403)
+})
+
+test('artifact indexing requires an explicit approved folder scope', async () => {
+  const suggestions = await fetch(`${base}/api/artifacts/scope`)
+  assert.equal(suggestions.status, 200)
+  assert.deepEqual((await suggestions.json()).roots, [])
+
+  const denied = await fetch(`${base}/api/artifacts/scope`, { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, body: JSON.stringify({ roots: [scopeProject] }) })
+  assert.equal(denied.status, 403)
+
+  const approved = await fetch(`${base}/api/artifacts/scope`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ roots: [scopeProject] }) })
+  assert.equal(approved.status, 200)
+  const body = await approved.json()
+  assert.equal(body.roots.length, 1)
+  assert.equal(body.artifacts.stats.total, 1)
+  assert.match(JSON.stringify(body.artifacts), /scoped-index-marker/)
+
+  const cleared = await fetch(`${base}/api/artifacts/scope`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ roots: [] }) })
+  assert.equal(cleared.status, 200)
+  assert.equal((await cleared.json()).artifacts.stats.total, 0)
 })
 
 test('mission API persists an objective and cancellation closes queued work', async () => {

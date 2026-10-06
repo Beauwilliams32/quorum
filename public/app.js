@@ -47,7 +47,7 @@ const S = {
   commandPreview: null,
   commandSelection: { packId: null, runtimeId: null },
   operatorTab: 'attention', operatorRegistry: null, operatorLoading: false,
-  artifactResults: null, artifactDetail: null, missionSelection: null, missionPreview: null, runtimeRuns: null, memoryBridge: null, recallContext: null,
+  artifactResults: null, artifactDetail: null, artifactScope: null, artifactScopeLoading: false, missionSelection: null, missionPreview: null, runtimeRuns: null, memoryBridge: null, recallContext: null,
 }
 
 const DEFAULT_MODEL_OPTIONS = [
@@ -2449,6 +2449,7 @@ function renderMemoryRing() {
   const ring = $('memory-ring')
   const resultsBox = $('artifact-results')
   if (!ring || !resultsBox) return
+  renderArtifactScope()
   // The ring is a navigational overview, not the whole corpus. Keeping the
   // orbit sparse gives each recent artifact a real hit target; the complete
   // bounded result list remains below for exhaustive search.
@@ -2458,7 +2459,9 @@ function renderMemoryRing() {
   // over an unreadable vault is exactly the kind of green this cockpit must
   // never show.
   const unreadableRoots = (S.artifacts?.roots || []).filter(root => root.readable === false)
-  const indexScope = unreadableRoots.length
+  const indexScope = !(S.artifacts?.roots || []).length
+    ? 'no folders approved'
+    : unreadableRoots.length
     ? `${unreadableRoots.length} root${unreadableRoots.length === 1 ? '' : 's'} unreadable`
     : stats.degraded ? 'partly unreadable' : stats.truncated ? 'partial' : 'full index'
   $('artifact-count').textContent = `${stats.total || entries.length} indexed · ${indexScope}`
@@ -2539,6 +2542,56 @@ function renderMemoryRing() {
       } catch (error) { status.textContent = error.message } finally { recall.disabled = false }
     }
   }
+}
+
+async function renderArtifactScope() {
+  const container = $('artifact-scope')
+  if (!container || S.artifactScopeLoading) return
+  if (!S.artifactScope) {
+    S.artifactScopeLoading = true
+    container.innerHTML = '<div class="artifact-scope-card"><b>Checking approved folders…</b></div>'
+    try {
+      const response = await fetch('/api/artifacts/scope')
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Could not load folder settings')
+      S.artifactScope = data
+    } catch (error) {
+      container.innerHTML = `<div class="artifact-scope-card"><b>Folder settings unavailable</b><span>${esc(error.message)}</span><button type="button" data-scope-retry>Retry</button></div>`
+      container.querySelector('[data-scope-retry]')?.addEventListener('click', () => { S.artifactScope = null; renderArtifactScope() }, { once: true })
+      S.artifactScopeLoading = false
+      return
+    }
+    S.artifactScopeLoading = false
+  }
+  if (container.dataset.scopeRendered === '1') return
+  const roots = S.artifactScope.roots || []
+  const enabled = roots.some(root => root.enabled)
+  container.innerHTML = `<details class="artifact-scope-details" ${enabled ? '' : 'open'}><summary>${enabled ? 'Indexed folders' : 'Choose folders to index'} <span>${enabled ? `${roots.filter(root => root.enabled).length} approved` : 'Nothing is indexed until you approve a folder'}</span></summary><form id="artifact-scope-form" class="artifact-scope-card"><p>Quorum searches only folders you select here. Content stays on this machine. Credentials and excluded files are filtered.</p><div class="artifact-scope-roots">${roots.map((root, index) => `<label><input type="checkbox" name="artifact-root" value="${esc(root.path)}" ${root.enabled ? 'checked' : ''}><span><b>${esc(root.label)}</b><small>${esc(root.path)}</small></span></label>`).join('') || '<span class="empty-sm">No suggested folders were found.</span>'}</div><label class="artifact-scope-custom"><span>Add a folder path</span><input name="custom-root" type="text" placeholder="/path/to/projects" autocomplete="off"></label><div class="artifact-scope-actions"><span>Rescanning after changes may take a moment.</span><button class="hq-btn primary" type="submit">Save folders and index</button></div><span class="form-status" data-scope-status></span></form></details>`
+  const form = container.querySelector('#artifact-scope-form')
+  container.dataset.scopeRendered = '1'
+  form?.addEventListener('submit', async event => {
+    event.preventDefault()
+    const status = form.querySelector('[data-scope-status]')
+    const button = form.querySelector('[type="submit"]')
+    const selected = [...form.querySelectorAll('input[name="artifact-root"]:checked')].map(input => input.value)
+    const custom = form.elements.namedItem('custom-root').value.trim()
+    if (custom) selected.push(custom)
+    try {
+      button.disabled = true
+      status.textContent = 'saving approved scope and indexing…'
+      const result = await postJson('/api/artifacts/scope', { roots: selected })
+      S.artifacts = result.artifacts
+      S.artifactResults = null
+      S.artifactDetail = null
+      S.recallContext = null
+      S.artifactScope = { roots: result.roots.map(root => ({ ...root, enabled: true })), approved: result.roots.length > 0 }
+      container.dataset.scopeRendered = ''
+      status.textContent = `indexed ${result.artifacts.stats.total} files across ${result.roots.length} approved folder${result.roots.length === 1 ? '' : 's'}`
+      renderMemoryRing()
+    } catch (error) {
+      status.textContent = error.message
+    } finally { button.disabled = false }
+  })
 }
 
 // A fresh snapshot invalidates every surface. Only the visible view is drawn

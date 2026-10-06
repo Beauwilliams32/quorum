@@ -9,6 +9,7 @@ const HOME = os.homedir()
 const DEFAULT_VAULT = path.join(HOME, 'Documents', 'Obsidian Vault')
 const QUORUM_DIR = path.join(HOME, '.quorum')
 const PATHS = indexPaths(QUORUM_DIR)
+const SCOPE_PATH = path.join(QUORUM_DIR, 'artifact-scope.json')
 const MAX_FILES = 40_000
 const SAMPLE_BYTES = 6_000
 const READ_BYTES = 240_000
@@ -63,18 +64,12 @@ function configuredVault() {
 }
 
 export function artifactRoots() {
-  // `''.split(':')` is `['']`, and `existingDir('')` resolves to the process
-  // CWD — so an unset QUORUM_ARTIFACT_ROOTS silently added whatever directory
-  // the server was started from as a fifth indexed root, four levels deep.
-  // Started from the repo, that indexed the repo.
-  const configured = String(process.env.QUORUM_ARTIFACT_ROOTS || '')
-    .split(path.delimiter).map(item => item.trim()).filter(Boolean).map(existingDir).filter(Boolean)
+  const scope = readArtifactScope()
+  const environmentRoots = String(process.env.QUORUM_ARTIFACT_ROOTS || '')
+    .split(path.delimiter).map(item => item.trim()).filter(Boolean)
   const roots = [
-    { id: 'vault', label: 'Obsidian Vault', path: configuredVault() },
-    { id: 'codex', label: 'Codex sessions + memories', path: path.join(HOME, '.codex') },
-    { id: 'claude', label: 'Claude sessions + jobs', path: path.join(HOME, '.claude') },
-    { id: 'workspace', label: 'CLAUDE workspace', path: path.join(HOME, 'CLAUDE'), maxDepth: 3 },
-    ...configured.map((item, index) => ({ id: `custom-${index + 1}`, label: `Configured root ${index + 1}`, path: item, maxDepth: 4 })),
+    ...scope.roots,
+    ...environmentRoots.map((item, index) => ({ path: item, id: `environment-${index + 1}` })),
   ]
   const seen = new Set()
   return roots.filter(root => {
@@ -82,8 +77,70 @@ export function artifactRoots() {
     if (!resolved || seen.has(resolved)) return false
     seen.add(resolved)
     root.path = resolved
+    root.maxDepth ??= 6
     return true
   })
+}
+
+function standardArtifactRoots() {
+  return [
+    { id: 'vault', label: 'Obsidian vault', path: configuredVault(), maxDepth: 8 },
+    { id: 'codex', label: 'Codex sessions and memories', path: path.join(HOME, '.codex'), maxDepth: 8 },
+    { id: 'claude', label: 'Claude sessions and jobs', path: path.join(HOME, '.claude'), maxDepth: 8 },
+    { id: 'workspace', label: 'Workspace projects', path: path.join(HOME, 'CLAUDE'), maxDepth: 5 },
+  ]
+}
+
+function readArtifactScope() {
+  try {
+    const value = JSON.parse(fs.readFileSync(SCOPE_PATH, 'utf8'))
+    return { configured: true, roots: Array.isArray(value.roots) ? value.roots.filter(root => root && typeof root.path === 'string') : [] }
+  } catch {
+    return { configured: fs.existsSync(SCOPE_PATH), roots: [] }
+  }
+}
+
+export function artifactScopeSuggestions() {
+  const activeRoots = artifactRoots()
+  const enabled = new Set(activeRoots.map(root => root.path))
+  const standard = standardArtifactRoots().flatMap(root => {
+    const resolved = existingDir(root.path)
+    return resolved ? [{ ...root, path: resolved, enabled: enabled.has(resolved) }] : []
+  })
+  const known = new Set(standard.map(root => root.path))
+  const custom = activeRoots.filter(root => !known.has(root.path)).map(root => ({ ...root, enabled: true }))
+  return [...standard, ...custom]
+}
+
+export function saveArtifactScope(inputRoots = []) {
+  if (!Array.isArray(inputRoots) || inputRoots.length > 30) throw new Error('choose up to 30 folders')
+  const suggestions = standardArtifactRoots()
+  const roots = []
+  const seen = new Set()
+  for (const input of inputRoots) {
+    if (typeof input !== 'string' || !input.trim()) throw new Error('each folder must be a path')
+    const candidate = existingDir(input)
+    if (!candidate) throw new Error(`folder does not exist or is not readable: ${input.slice(0, 160)}`)
+    let resolved
+    try { resolved = fs.realpathSync(candidate) } catch { throw new Error('folder cannot be resolved') }
+    if (resolved === path.parse(resolved).root) throw new Error('the filesystem root cannot be indexed')
+    if (seen.has(resolved)) continue
+    seen.add(resolved)
+    const known = suggestions.find(root => {
+      try { return fs.realpathSync(root.path) === resolved } catch { return false }
+    })
+    roots.push({
+      id: known?.id || `custom-${crypto.createHash('sha256').update(resolved).digest('hex').slice(0, 12)}`,
+      label: known?.label || path.basename(resolved) || 'Selected folder',
+      path: resolved,
+      maxDepth: known?.maxDepth || 6,
+    })
+  }
+  fs.mkdirSync(QUORUM_DIR, { recursive: true, mode: 0o700 })
+  const temporary = `${SCOPE_PATH}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, roots, approvedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 })
+  fs.renameSync(temporary, SCOPE_PATH)
+  return { path: SCOPE_PATH, roots }
 }
 
 /**

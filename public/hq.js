@@ -107,8 +107,10 @@ export function proposalHtml(approval) {
   const proposal = approval?.kind === 'hire' && approval.status === 'pending' ? approval.proposal : null
   if (!proposal) return ''
   const brief = String(proposal.instructions || '')
+  const projectBriefs = Object.entries(proposal.projectInstructions || {})
   return `<div class="hq-proposal"><span>${esc(proposal.packId)} pack · ${esc(proposal.runtime)} · ${esc(proposal.modelRef)} · ${money(proposal.budget?.monthlyUsd)}/mo · ${esc(proposal.roomId || 'no room')}</span>` +
-    (brief ? `<details><summary>Brief · ${brief.length} chars</summary><pre class="hq-brief">${esc(brief)}</pre></details>` : '<span>No brief.</span>') + `</div>`
+    (brief ? `<details><summary>Role brief · ${brief.length} chars</summary><pre class="hq-brief">${esc(brief)}</pre></details>` : '<span>No role brief.</span>') +
+    projectBriefs.map(([roomId, text]) => `<details><summary>Project brief · ${esc(roomId)} · ${String(text).length} chars</summary><pre class="hq-brief">${esc(text)}</pre></details>`).join('') + `</div>`
 }
 
 function approvalButtons(approval) {
@@ -393,6 +395,7 @@ export function agentHtml(hq, ui) {
   const manager = agent.reportsTo ? agents.get(agent.reportsTo) : null
   const tickets = (hq.tickets || []).filter(ticket => ticket.assigneeId === agent.id && !['done', 'cancelled'].includes(ticket.status))
   const rooms = new Map((hq.rooms || []).map(room => [room.id, room]))
+  const projectRooms = hq.rooms || []
   const active = agent.status === 'active'
   const row = (label, value) => `<div class="hq-kv"><span>${label}</span><span>${value}</span></div>`
   const heartbeat = agent.heartbeat.enabled ? `every ${agent.heartbeat.everyMinutes}m${agent.heartbeat.nextAt ? ` · next ${esc(clock(new Date(agent.heartbeat.nextAt).toISOString()))}` : ''}` : 'off'
@@ -414,6 +417,7 @@ export function agentHtml(hq, ui) {
       ? `${esc(agent.autonomy)} <button type="button" class="hq-link" data-hq-action="toggle-autonomy" data-id="${esc(agent.id)}">${agent.autonomy === 'autonomous' ? 'ask me first' : 'let them start runs'}</button>`
       : `${esc(agent.autonomy)} <span class="hq-warn-text">${esc(agent.runtime)} runs report no price, so a cap cannot see them — this agent always asks first</span>`) +
     (agent.instructions ? `<p class="hq-instructions">${esc(agent.instructions)}</p>` : '') +
+    (projectRooms.length ? `<form class="hq-project-brief-form hq-form" data-id="${esc(agent.id)}" autocomplete="off"><h3 class="hq-panel-head">Project-specific brief</h3><p class="hq-hint">This additional brief is included only when ${esc(agent.name)} works in the selected project. The agent's identity and role stay the same across projects.</p><label class="hq-field"><span>Project</span><select name="roomId">${projectRooms.map(room => `<option value="${esc(room.id)}"${room.id === (agent.roomId || projectRooms[0].id) ? ' selected' : ''}>${esc(room.label)}</option>`).join('')}</select></label><label class="hq-field"><span>Instructions for this project</span><textarea name="projectBrief" rows="3" maxlength="2000" placeholder="Project goals, conventions, or review priorities">${esc(agent.projectInstructions?.[agent.roomId || projectRooms[0].id] || '')}</textarea></label><button type="submit" class="hq-btn">Save project brief</button><span class="form-status"></span></form>` : '') +
     `<h3 class="hq-panel-head">Open tickets <span>${tickets.length}</span></h3>` +
     (tickets.length ? tickets.map(ticket => `<button type="button" class="hq-ticket" data-hq-ticket="${esc(ticket.id)}"><span class="hq-ticket-id">${esc(ticket.id)}</span><span class="hq-ticket-title">${esc(clip(ticket.title, 80))}</span>${statusPill(ticket.status)}</button>`).join('') : '<p class="hq-hint">Nothing assigned.</p>')
 }
@@ -763,7 +767,24 @@ export function wireHq({ S, rerender, setView, doc = globalThis.document }) {
       if (await act(() => api(`/routines/${encodeURIComponent(id)}`, { method: 'PATCH', body: { assigneeId: data.assigneeId } }), result => `${id} is now for @${result.routine.assigneeId} — resume it when you are ready`)) refresh()
     } else if (form.classList.contains('hq-budget-form')) {
       await act(() => api(`/agents/${encodeURIComponent(form.dataset.id)}`, { method: 'PATCH', body: { budget: { monthlyUsd: Number(data.monthlyUsd) } } }), 'Budget updated')
+    } else if (form.classList.contains('hq-project-brief-form')) {
+      const agent = (S.hq?.agents || []).find(item => item.id === form.dataset.id)
+      const projectInstructions = { ...(agent?.projectInstructions || {}) }
+      if (data.projectBrief.trim()) projectInstructions[data.roomId] = data.projectBrief.trim()
+      else delete projectInstructions[data.roomId]
+      const status = form.querySelector('.form-status')
+      if (status) status.textContent = 'saving…'
+      await act(() => api(`/agents/${encodeURIComponent(form.dataset.id)}`, { method: 'PATCH', body: { projectInstructions } }), result => `Project brief saved for ${S.hq?.rooms?.find(room => room.id === data.roomId)?.label || data.roomId}`)
+      if (status) status.textContent = ''
     }
+  })
+
+  root.addEventListener('change', event => {
+    const form = event.target.closest('.hq-project-brief-form')
+    if (!form || event.target.name !== 'roomId') return
+    const agent = (S.hq?.agents || []).find(item => item.id === form.dataset.id)
+    const brief = form.elements.namedItem('projectBrief')
+    if (brief) brief.value = agent?.projectInstructions?.[event.target.value] || ''
   })
 
   root.addEventListener('click', async event => {
@@ -773,8 +794,9 @@ export function wireHq({ S, rerender, setView, doc = globalThis.document }) {
     if (d.hqApprove) {
       const approval = (S.hq?.approvals || []).find(item => item.id === d.hqApprove)
       const brief = String(approval?.proposal?.instructions || '')
+      const projectBriefs = Object.entries(approval?.proposal?.projectInstructions || {}).map(([roomId, text]) => `\n\n${roomId} project brief:\n${text}`).join('')
       const question = approval?.kind === 'hire'
-        ? `Approve: ${approval.summary}?${brief ? `\n\nTheir brief, which goes into every run they make:\n${brief.length > 1200 ? `${brief.slice(0, 1200)}… (${brief.length} chars — read it all in the inbox)` : brief}` : ''}`
+        ? `Approve: ${approval.summary}?${brief ? `\n\nTheir role brief:\n${brief.length > 1200 ? `${brief.slice(0, 1200)}… (read the full brief in the inbox)` : brief}` : ''}${projectBriefs}`
         : `Approve ${d.hqApprove}? This starts a real run that spends money on the agent's harness.\n\n${approval?.summary || ''}`
       if (!globalThis.confirm?.(question)) return
       return act(() => api(`/approvals/${encodeURIComponent(d.hqApprove)}/approve`, { method: 'POST', body: {} }), `${d.hqApprove} approved`)

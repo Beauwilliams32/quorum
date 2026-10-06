@@ -54,7 +54,7 @@ export function detectRuntimes(env = process.env) {
 /** Roles launched in the harness's read-only sandbox. Every other role can write. */
 export const READ_ONLY_ROLES = Object.freeze(['researcher', 'recovery', 'reviewer'])
 
-export function buildLaunch({ runtime = 'generic', role = 'researcher', cwd = process.cwd(), argv = [], runtimeSpec = null } = {}) {
+export function buildLaunch({ runtime = 'generic', role = 'researcher', cwd = process.cwd(), argv = [], runtimeSpec = null, config = loadConfig() } = {}) {
   const configured = runtimeSpec || loadRuntimes().find(item => item.id === runtime)
   const spec = resolveProviderSpec(runtime, RUNTIMES[runtime] || configured) || configured || { command: runtime, label: runtime }
   const command = argv[0] || spec.command
@@ -83,6 +83,10 @@ export function buildLaunch({ runtime = 'generic', role = 'researcher', cwd = pr
   }
   if (spec.workdirFlag && !args.includes(spec.workdirFlag) && !['claude', 'codex', 'hermes'].includes(runtime)) args.push(spec.workdirFlag, path.resolve(cwd))
   const env = { ...process.env, QUORUM_AGENT_ROLE: role, QUORUM_AGENT_WORKDIR: path.resolve(cwd) }
+  // The CLI must use the same validated endpoint as Quorum's model catalog.
+  // Otherwise it silently talks to Ollama's default port instead of the
+  // configured local model server (which may have no usable models).
+  if (runtime === 'ollama' && config.ollamaHost) env.OLLAMA_HOST = config.ollamaHost
   const pathValue = [...new Set([...String(env.PATH || '').split(path.delimiter), ...EXTRA_PATHS])].filter(Boolean).join(path.delimiter)
   env.PATH = pathValue
   env.QUORUM_AGENT_CONTRACT_FILE = promptFile
@@ -106,13 +110,14 @@ const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`
  * it is one quoted argv value for runtimes that support prompt mode. Runtimes
  * without a known prompt flag still open in their normal interactive mode.
  */
-export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd = process.cwd(), task = '', model = '', promptFile = null, runtimeSpec = null, structured = false } = {}) {
+export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd = process.cwd(), task = '', model = '', promptFile = null, runtimeSpec = null, structured = false, config = loadConfig() } = {}) {
   const configured = runtimeSpec || loadRuntimes().find(item => item.id === runtime) || null
   const spec = resolveProviderSpec(runtime, RUNTIMES[runtime] || configured) || configured || { promptMode: 'stdin' }
-  const plan = buildLaunch({ runtime, runtimeSpec: configured, role, cwd })
+  const plan = buildLaunch({ runtime, runtimeSpec: configured, role, cwd, config })
   const args = [...plan.args]
   const prompt = String(task || '').trim().slice(0, 8000)
-  const chosenModel = String(model || '').trim()
+  const requestedModel = String(model || '').trim()
+  const chosenModel = requestedModel && requestedModel !== 'auto' ? requestedModel : String(config.modelMappings?.[runtime] || '').trim()
   if (runtime === 'claude') {
     args.unshift('-p', prompt || 'Inspect the current task and report the next safe action.')
     if (chosenModel && chosenModel !== 'auto') args.push('--model', chosenModel)
@@ -129,6 +134,10 @@ export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd 
   } else if (runtime === 'copilot') {
     args.unshift('-p', prompt || 'Inspect the current task and report the next safe action.')
     if (chosenModel && chosenModel !== 'auto') args.push('--model', chosenModel)
+    args.push('--no-remote')
+    // A reviewer or scout is not allowed to edit the workspace or call the
+    // bundled GitHub MCP, even when the CLI's OAuth session is already valid.
+    if (READ_ONLY_ROLES.includes(role)) args.push('--mode', 'plan', '--disable-builtin-mcps')
   } else if (runtime === 'hermes') {
     args.unshift('chat', '--query', prompt || 'Inspect the current task and report the next safe action.')
     if (chosenModel && chosenModel !== 'auto') args.push('--model', chosenModel)
@@ -136,9 +145,8 @@ export function buildTaskLaunch({ runtime = 'generic', role = 'researcher', cwd 
     args.unshift('-p', prompt || 'Inspect the current task and report the next safe action.')
     if (chosenModel && chosenModel !== 'auto') args.push('--model', chosenModel)
   } else if (runtime === 'ollama') {
-    // Prefer the ollama model from ~/.quorum/config.json; never the stale
-    // gemma3:latest stub that is absent when the model volume is unmounted.
-    const localModel = chosenModel && chosenModel !== 'auto' ? chosenModel : (loadConfig().modelMappings?.ollama || 'gemma4:31b-cloud')
+    // Never default to a cloud-suffixed Ollama model as a local fallback.
+    const localModel = chosenModel && chosenModel !== 'auto' ? chosenModel : 'gemma3:latest'
     args.unshift('run', localModel, prompt || 'Inspect the current task and report the next safe action.')
   } else if (spec.promptMode === 'arg' && spec.promptFlag) {
     args.push(spec.promptFlag, prompt || 'Inspect the current task and report the next safe action.')

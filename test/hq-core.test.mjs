@@ -256,6 +256,29 @@ test('the work prompt carries role, goal, ticket and thread — bounded, with ho
     assert.ok(prompt.includes(needle), `prompt should include ${needle}`)
 })
 
+test('the work prompt scopes project-specific instructions to its project', () => {
+  const text = buildWorkPrompt({
+    company: { name: 'Acme' },
+    agent: { name: 'Codey', title: 'Engineer', instructions: 'Keep changes small.' },
+    project: { id: 'portal', label: 'Customer Portal' },
+    projectInstructions: 'Preserve tenant boundaries and run the portal checks.',
+    ticket: { id: 'T-1', title: 'Fix it', priority: 'normal' },
+  })
+  assert.match(text, /Project: Customer Portal/)
+  assert.match(text, /Project-specific brief for this project/)
+  assert.match(text, /Preserve tenant boundaries/)
+  assert.match(text, /Keep changes small/)
+})
+
+test('an agent keeps a validated brief per project room', t => {
+  const { hq } = makeHq(t)
+  hq.init({ name: 'Acme', template: 'blank', roomId: 'app' })
+  hq.hire({ id: 'codey', name: 'Codey', title: 'Engineer', runtime: 'claude', roomId: 'app' })
+  const updated = hq.updateAgent('codey', { projectInstructions: { app: 'Follow the app team conventions.' } }).agent
+  assert.equal(updated.projectInstructions.app, 'Follow the app team conventions.')
+  assert.throws(() => hq.updateAgent('codey', { projectInstructions: { missing: 'No such project.' } }), /unknown project room/)
+})
+
 test('avatars: only known parts survive, anything else falls back to a deterministic look', () => {
   const clean = validateAvatar({ palette: 'rose', visor: 'curve', crest: '<script>', prop: 'brush' }, 'pixel')
   assert.equal(clean.palette, 'rose')

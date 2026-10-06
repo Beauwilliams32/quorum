@@ -8,7 +8,7 @@ import { defaultPackModel, resolveAgentPack, agentPackPromptPath } from './agent
 const ACTIONS = new Set(['launch', 'stop', 'route', 'chain', 'config'])
 const chains = new Set(['question-roundtable-task', 'roundtable-decision-task'])
 
-export function previewAction(input = {}, catalog, state, ptys) {
+export function previewAction(input = {}, catalog, state, ptys, runtimeConfig = loadConfig()) {
   const action = String(input.action || '')
   if (!ACTIONS.has(action)) throw new Error('unknown command action')
   if (action === 'launch') {
@@ -22,14 +22,18 @@ export function previewAction(input = {}, catalog, state, ptys) {
       // valid execution target. The pack controls role and contract; it does
       // not create an arbitrary provider allowlist.
       if (!input.task || typeof input.task !== 'string' || !input.task.trim()) throw new Error('agent task is required')
-      const modelRef = String(input.modelRef || defaultPackModel(pack.id, runtime.id, input.modelOptions || [])).slice(0, 160)
+      const requestedModelRef = String(input.modelRef || '').trim()
+      const mappedModel = runtimeConfig.modelMappings?.[runtime.id]
+      const modelRef = String((!requestedModelRef || requestedModelRef === `${runtime.id}:auto`) && mappedModel
+        ? `${runtime.id}:${mappedModel}`
+        : requestedModelRef || defaultPackModel(pack.id, runtime.id, input.modelOptions || [])).slice(0, 160)
       const split = modelRef.indexOf(':')
       const provider = split > 0 ? modelRef.slice(0, split) : runtime.id
       const model = split > 0 ? modelRef.slice(split + 1) : modelRef
       if (provider !== runtime.id) throw new Error(`model provider ${provider} does not match ${runtime.id}`)
       let contractFile = null
       try { contractFile = agentPackPromptPath(pack.id) } catch { /* custom packs carry a validated local contract; no browser exposure */ }
-      const built = buildTaskLaunch({ runtime: runtime.id, runtimeSpec: runtime, role: pack.role, cwd: room.cwd, task: input.task, model, promptFile: contractFile, structured: input.managed === true })
+      const built = buildTaskLaunch({ runtime: runtime.id, runtimeSpec: runtime, role: pack.role, cwd: room.cwd, task: input.task, model, promptFile: contractFile, structured: input.managed === true, config: runtimeConfig })
       // Never return the launch environment to the browser: it inherits the
       // user's runtime auth and may contain provider credentials.
       const { env: _secretBearingEnv, ...launch } = built

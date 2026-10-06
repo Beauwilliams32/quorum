@@ -352,6 +352,17 @@ export class Hq {
     const defaultModel = runtime === 'claude' ? `claude:${pack.defaultModel || 'sonnet'}` : `${runtime}:auto`
     const modelRef = clip(input.modelRef ?? (input.runtime !== undefined && input.runtime !== existing?.runtime ? defaultModel : existing?.modelRef) ?? defaultModel, 160) || defaultModel
     const roomId = input.roomId !== undefined ? this.#roomIdOrNull(input.roomId) : existing?.roomId ?? null
+    let projectInstructions = existing?.projectInstructions || {}
+    if (input.projectInstructions !== undefined) {
+      if (!input.projectInstructions || typeof input.projectInstructions !== 'object' || Array.isArray(input.projectInstructions) || Object.keys(input.projectInstructions).length > 30) throw new HqError('project instructions must map up to 30 project rooms to text')
+      projectInstructions = {}
+      for (const [projectRoomId, value] of Object.entries(input.projectInstructions)) {
+        if (typeof value !== 'string') throw new HqError(`project instructions for ${clip(projectRoomId, 60)} must be text`)
+        const validRoomId = this.#roomIdOrNull(projectRoomId)
+        const brief = clipBlock(value, 2000)
+        if (brief) projectInstructions[validRoomId] = brief
+      }
+    }
     const monthlyUsd = numberIn(input.budget?.monthlyUsd ?? input.budgetUsd ?? existing?.budget?.monthlyUsd, 0, 100_000, 10)
     const warnPct = numberIn(input.budget?.warnPct ?? existing?.budget?.warnPct, 1, 100, 80)
     const heartbeatIn = input.heartbeat ?? {}
@@ -368,7 +379,7 @@ export class Hq {
     if (autonomy === 'autonomous' && !PRICED_RUNTIMES.includes(runtime)) throw new HqError(`${runtime} runs report no price, so a monthly cap cannot see what an autonomous ${runtime} agent spends — keep it supervised`)
     if (autonomy === 'autonomous' && monthlyUsd <= 0) throw new HqError('an autonomous agent needs a monthly budget cap — its runs start without asking you first')
     return {
-      name, title, packId: pack.id, role: pack.role || 'builder', runtime, modelRef, roomId,
+      name, title, packId: pack.id, role: pack.role || 'builder', runtime, modelRef, roomId, projectInstructions,
       instructions: input.instructions !== undefined ? clipBlock(input.instructions, 2000) : existing?.instructions || '',
       budget: { monthlyUsd, warnPct, warnedMonth: existing?.budget?.warnedMonth ?? null },
       heartbeat, autonomy,
@@ -395,7 +406,7 @@ export class Hq {
       // exactly what gets hired.
       const proposal = {
         id, name: fields.name, title: fields.title, packId: fields.packId, runtime: fields.runtime, modelRef: fields.modelRef,
-        roomId: fields.roomId, reportsTo, budget: { monthlyUsd: fields.budget.monthlyUsd }, instructions: fields.instructions,
+        roomId: fields.roomId, reportsTo, budget: { monthlyUsd: fields.budget.monthlyUsd }, instructions: fields.instructions, projectInstructions: fields.projectInstructions,
         avatar: validateAvatar(input.avatar, id, { packId: fields.packId, title: fields.title }),
       }
       // The pack decides the harness sandbox, so it is named with what it
@@ -1510,13 +1521,14 @@ export class Hq {
       verify: verifyText(ticket.verifyCommand) || null,
       brief: sha256(canonical({ title: ticket.title, body: ticket.body, goalId: ticket.goalId || null, blockedBy: ticket.blockedBy || [] })).slice(0, 16),
       instructions: sha256(canonical({ instructions: agent.instructions || '' })).slice(0, 16),
+      projectInstructions: sha256(canonical({ brief: agent.projectInstructions?.[readiness.room.id] || '' })).slice(0, 16),
     }
   }
 
   #planHash(plan) { return sha256(canonical(plan)).slice(0, 16) }
 
   #planChanges(before, after) {
-    const names = { agentId: 'assignee', roomId: 'workspace', cwd: 'workspace path', branch: 'branch', runtime: 'harness', modelRef: 'model', packId: 'job pack', role: 'sandbox', verify: 'verify command', brief: 'ticket text', instructions: 'agent brief' }
+    const names = { agentId: 'assignee', roomId: 'workspace', cwd: 'workspace path', branch: 'branch', runtime: 'harness', modelRef: 'model', packId: 'job pack', role: 'sandbox', verify: 'verify command', brief: 'ticket text', instructions: 'agent brief', projectInstructions: 'project-specific brief' }
     return Object.keys(names).filter(key => (before?.[key] ?? null) !== (after[key] ?? null)).map(key => names[key])
   }
 
@@ -1555,6 +1567,7 @@ export class Hq {
       const reports = Object.values(this.data.agents).filter(item => item.reportsTo === agent.id && item.status !== 'terminated')
       const prompt = buildWorkPrompt({
         company: this.data.company, agent, manager, reports,
+        project: readiness.room, projectInstructions: agent.projectInstructions?.[readiness.room.id] || '',
         goal: ticket.goalId ? this.data.goals[ticket.goalId] : null,
         ticket, thread: this.store.thread(ticket.id).map(publicMessage),
         blockers: (ticket.blockedBy || []).map(id => this.data.tickets[id]).filter(Boolean),
@@ -1911,7 +1924,7 @@ export class Hq {
       runtime: agent.runtime, runtimeLabel: runtime.label, runtimeAvailable: runtime.available, dispatchable: runtime.structured && runtime.available !== false,
       // Whether this harness reports a price per run — and so can be trusted to run without asking.
       priced: PRICED_RUNTIMES.includes(agent.runtime),
-      modelRef: agent.modelRef, reportsTo: agent.reportsTo, roomId: agent.roomId, instructions: agent.instructions,
+      modelRef: agent.modelRef, reportsTo: agent.reportsTo, roomId: agent.roomId, instructions: agent.instructions, projectInstructions: agent.projectInstructions || {},
       avatar: publicAvatar(agent.avatar),
       budget: this.budget(agent.id),
       heartbeat: { enabled: agent.heartbeat.enabled, everyMinutes: agent.heartbeat.everyMinutes, nextAt: agent.heartbeat.nextAt, lastAt: agent.heartbeat.lastAt },

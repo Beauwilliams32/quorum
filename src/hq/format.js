@@ -208,6 +208,10 @@ export function formatInbox(hq, { c = painter(false) } = {}) {
       lines.push(c.gray(`       brief (${brief.length} chars):`))
       for (const paragraph of brief.split('\n')) for (const line of wrap(paragraph, 88)) lines.push(`         ${line}`)
     }
+    for (const [roomId, projectBrief] of Object.entries(approval.kind === 'hire' ? approval.proposal?.projectInstructions || {} : {})) {
+      lines.push(c.gray(`       ${roomId} project brief (${String(projectBrief).length} chars):`))
+      for (const paragraph of String(projectBrief).split('\n')) for (const line of wrap(paragraph, 88)) lines.push(`         ${line}`)
+    }
     lines.push(c.gray(`       quorum approve ${approval.id}   ·   quorum deny ${approval.id} [reason]`))
   }
   lines.push('', c.bold(`BLOCKED (${blocked.length})`))
