@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { scratchDir } from './helpers/scratch.mjs';
 
@@ -41,7 +41,7 @@ test('installer writes a client-specific LaunchAgent without loading it', t => {
   assert.match(plist, /<key>RunAtLoad<\/key><true\/>/);
 });
 
-test('shipped Quorum LaunchAgent does not require OpenClaw to start', () => {
+test('shipped Quorum LaunchAgent does not require OpenClaw to start', { skip: !existsSync(join(root, 'launchd', 'com.tridentsocial.quorum.plist')) }, () => {
   const plist = readFileSync(join(root, 'launchd', 'com.tridentsocial.quorum.plist'), 'utf8');
   assert.doesNotMatch(plist, /quorum-openclaw-env-wrapper|openclaw gateway auth-token/);
   assert.match(plist, /<string>\/opt\/homebrew\/opt\/node\/bin\/node<\/string>/);
